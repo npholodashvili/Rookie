@@ -1,0 +1,86 @@
+{
+  "ok": true,
+  "generated_at": "2026-03-25T10:36:55.357905+00:00",
+  "return_clip": 3.0,
+  "label_sources_filter": null,
+  "paired_samples": 121,
+  "by_expected_edge_bin": [
+    {
+      "bucket": "0.02-0.03",
+      "n": 2,
+      "win_rate": 1.0,
+      "avg_return_pct": 1.0074519095020824
+    },
+    {
+      "bucket": "0.03-0.04",
+      "n": 1,
+      "win_rate": 0.0,
+      "avg_return_pct": -1.0
+    },
+    {
+      "bucket": "0.04-0.06",
+      "n": 2,
+      "win_rate": 0.0,
+      "avg_return_pct": -0.398164387551558
+    },
+    {
+      "bucket": "0.06-0.10",
+      "n": 9,
+      "win_rate": 0.1111111111111111,
+      "avg_return_pct": -0.28640530699653277
+    },
+    {
+      "bucket": "0.10-1.00",
+      "n": 107,
+      "win_rate": 0.5046728971962616,
+      "avg_return_pct": 0.08561115178463913
+    }
+  ],
+  "by_abs_divergence_bin": [
+    {
+      "bucket": "0.06-0.10",
+      "n": 3,
+      "win_rate": 0.0,
+      "avg_return_pct": -0.4319422292763935
+    },
+    {
+      "bucket": "0.10+",
+      "n": 118,
+      "win_rate": 0.4830508474576271,
+      "avg_return_pct": 0.06861989160777815
+    }
+  ],
+  "by_market_type": {
+    "unknown": {
+      "n": 52,
+      "win_rate": 0.5769230769230769,
+      "avg_return_pct": 0.12880616813057777
+    },
+    "crypto": {
+      "n": 8,
+      "win_rate": 0.125,
+      "avg_return_pct": -0.6711048122483649
+    },
+    "weather": {
+      "n": 13,
+      "win_rate": 0.3076923076923077,
+      "avg_return_pct": -0.10138665615613128
+    },
+    "other": {
+      "n": 29,
+      "win_rate": 0.4827586206896552,
+      "avg_return_pct": 0.08533014307558098
+    },
+    "sports": {
+      "n": 16,
+      "win_rate": 0.5,
+      "avg_return_pct": 0.2968168586967133
+    },
+    "politics": {
+      "n": 3,
+      "win_rate": 0.0,
+      "avg_return_pct": -0.14445969374134646
+    }
+  },
+  "note": "Read-only. Use bins with n>=10 before changing min_expected_edge; wide CI on small n."
+}

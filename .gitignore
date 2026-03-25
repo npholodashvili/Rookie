@@ -1,0 +1,13 @@
+node_modules/
+.env
+*.log
+data/reports/
+data/.env.local
+data/.telegram_poll.lock
+__pycache__/
+*.pyc
+.venv/
+venv/
+dist/
+build/
+.DS_Store

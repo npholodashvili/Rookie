@@ -1,0 +1,2 @@
+# Rookie
+Simmer Trader Bot

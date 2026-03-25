@@ -1,0 +1,4 @@
+simmer-sdk>=0.9.14
+httpx>=0.25.0
+python-dotenv>=1.0.0
+requests>=2.31.0
