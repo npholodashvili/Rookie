@@ -11,3 +11,7 @@ venv/
 dist/
 build/
 .DS_Store
+data/decision_journal.jsonl
+data/game_state.json
+data/decision_journal.jsonl
+data/trade_history.json

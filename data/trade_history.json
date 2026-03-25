@@ -3249,5 +3249,15 @@
     "created_at": "2026-03-25T12:18:18.027976+00:00",
     "source": "sdk:rookie",
     "reason": "take-profit (235.2%)"
+  },
+  {
+    "trade_id": "a54c8e63-3a46-47df-80ee-edad3196d7f9",
+    "market_id": "1be79be4-112b-47ef-96da-ef42a86d6e8d",
+    "side": "no",
+    "action": "buy",
+    "amount": 12,
+    "venue": "sim",
+    "created_at": "2026-03-25T12:30:44.895202+00:00",
+    "source": "sdk:rookie"
   }
 ]
