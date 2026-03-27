@@ -1,56 +1,56 @@
 {
   "ok": true,
-  "generated_at": "2026-03-27T01:45:01.129022+00:00",
+  "generated_at": "2026-03-27T14:17:13.569072+00:00",
   "return_clip": 3.0,
   "label_sources_filter": null,
   "learning_window": {
     "cutoff": "2026-03-21T15:00:00+00:00",
     "dropped_before_cutoff": 95
   },
-  "paired_samples": 68,
+  "paired_samples": 83,
   "by_expected_edge_bin": [
     {
       "bucket": "0.06-0.10",
-      "n": 7,
-      "win_rate": 0.42857142857142855,
-      "avg_return_pct": 0.018414003469142983
+      "n": 13,
+      "win_rate": 0.6153846153846154,
+      "avg_return_pct": 0.25800318666101363
     },
     {
       "bucket": "0.10-1.00",
-      "n": 61,
-      "win_rate": 0.4262295081967213,
-      "avg_return_pct": 0.0719273224972935
+      "n": 70,
+      "win_rate": 0.45714285714285713,
+      "avg_return_pct": 0.11909928702311168
     }
   ],
   "by_abs_divergence_bin": [
     {
       "bucket": "0.06-0.10",
-      "n": 1,
-      "win_rate": 0.0,
-      "avg_return_pct": -0.15730417444463574
+      "n": 6,
+      "win_rate": 0.8333333333333334,
+      "avg_return_pct": 0.526815013363905
     },
     {
       "bucket": "0.10+",
-      "n": 67,
-      "win_rate": 0.43283582089552236,
-      "avg_return_pct": 0.06975774434423195
+      "n": 77,
+      "win_rate": 0.45454545454545453,
+      "avg_return_pct": 0.11078053815620212
     }
   ],
   "by_market_type": {
     "sports": {
-      "n": 14,
-      "win_rate": 0.7857142857142857,
-      "avg_return_pct": 0.503067386490981
+      "n": 17,
+      "win_rate": 0.7058823529411765,
+      "avg_return_pct": 0.42090391814560313
     },
     "crypto": {
-      "n": 16,
-      "win_rate": 0.125,
-      "avg_return_pct": -0.17754743229718975
+      "n": 17,
+      "win_rate": 0.11764705882352941,
+      "avg_return_pct": -0.19680646376003802
     },
     "other": {
-      "n": 23,
-      "win_rate": 0.6086956521739131,
-      "avg_return_pct": 0.13050277375052777
+      "n": 33,
+      "win_rate": 0.7272727272727273,
+      "avg_return_pct": 0.32367027981225077
     },
     "weather": {
       "n": 13,
@@ -58,9 +58,9 @@
       "avg_return_pct": -0.18501915597528634
     },
     "politics": {
-      "n": 2,
+      "n": 3,
       "win_rate": 0.0,
-      "avg_return_pct": -0.14101728304160577
+      "avg_return_pct": -0.1315118041563891
     }
   },
   "note": "Read-only. Use bins with n>=10 before changing min_expected_edge; wide CI on small n."

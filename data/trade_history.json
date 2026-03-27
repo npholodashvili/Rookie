@@ -4163,5 +4163,163 @@
     "venue": "sim",
     "created_at": "2026-03-27T11:49:38.107660+00:00",
     "source": "sdk:rookie"
+  },
+  {
+    "trade_id": "b71ffe24-ff5c-4999-86c1-c78fdd0b23b2",
+    "market_id": "e1135c3c-4da1-474a-94c2-07a0b1305055",
+    "side": "yes",
+    "action": "sell",
+    "amount": 0,
+    "shares": 95.99990844726562,
+    "venue": "sim",
+    "created_at": "2026-03-27T11:52:19.931439+00:00",
+    "source": "sdk:rookie",
+    "reason": "take-profit (378.2%)"
+  },
+  {
+    "trade_id": "ffb04ed2-4dcf-468f-9ada-acc5f789e87d",
+    "market_id": "e250649f-876a-4b62-92d0-5e2fe0290d33",
+    "side": "no",
+    "action": "buy",
+    "amount": 12,
+    "venue": "sim",
+    "created_at": "2026-03-27T12:01:00.036845+00:00",
+    "source": "sdk:rookie"
+  },
+  {
+    "trade_id": "ebede140-6ec7-4a7a-a0f0-91746104bcbf",
+    "market_id": "e250649f-876a-4b62-92d0-5e2fe0290d33",
+    "side": "no",
+    "action": "buy",
+    "amount": 12,
+    "venue": "sim",
+    "created_at": "2026-03-27T12:15:47.283992+00:00",
+    "source": "sdk:rookie"
+  },
+  {
+    "trade_id": "2fc58dac-9a4e-4835-9687-96a76f0f93cc",
+    "market_id": "2e04d2a8-213d-4552-973b-175797e3bd39",
+    "side": "no",
+    "action": "sell",
+    "amount": 0,
+    "shares": 47.0587786506204,
+    "venue": "sim",
+    "created_at": "2026-03-27T12:31:29.113788+00:00",
+    "source": "sdk:rookie",
+    "reason": "max-hold-time (12.0h >= 12.0h)"
+  },
+  {
+    "trade_id": "2539c3d9-bf96-45f9-8d58-28e4b796783b",
+    "market_id": "e250649f-876a-4b62-92d0-5e2fe0290d33",
+    "side": "no",
+    "action": "buy",
+    "amount": 12,
+    "venue": "sim",
+    "created_at": "2026-03-27T12:45:37.498576+00:00",
+    "source": "sdk:rookie"
+  },
+  {
+    "trade_id": "9eb70b28-03b0-42fc-8f04-c19cbd0820fa",
+    "market_id": "e250649f-876a-4b62-92d0-5e2fe0290d33",
+    "side": "no",
+    "action": "buy",
+    "amount": 12,
+    "venue": "sim",
+    "created_at": "2026-03-27T13:00:34.907277+00:00",
+    "source": "sdk:rookie"
+  },
+  {
+    "trade_id": "7fdf2e6e-216c-4cf9-a7c4-21c46ab5b8fc",
+    "market_id": "464caf0b-12f3-42f5-b901-c59c21eaa9ee",
+    "side": "no",
+    "action": "sell",
+    "amount": 0,
+    "shares": 21.05261150159334,
+    "venue": "sim",
+    "created_at": "2026-03-27T13:01:19.028387+00:00",
+    "source": "sdk:rookie",
+    "reason": "max-hold-time (12.0h >= 12.0h)"
+  },
+  {
+    "trade_id": "7cb2583e-b1af-438f-a150-d6813d12f44b",
+    "market_id": "e2ca5c72-20d4-472e-8629-937d4bc25f54",
+    "side": "yes",
+    "action": "sell",
+    "amount": 0,
+    "shares": 217.60538366672102,
+    "venue": "sim",
+    "created_at": "2026-03-27T13:10:18.853639+00:00",
+    "source": "sdk:rookie",
+    "reason": "take-profit (80.4%)"
+  },
+  {
+    "trade_id": "8b02747a-aea5-485d-b8a1-6c3adf908c8c",
+    "market_id": "d4490afe-81f7-452f-9d6f-1c5af72795ca",
+    "side": "yes",
+    "action": "buy",
+    "amount": 12,
+    "venue": "sim",
+    "created_at": "2026-03-27T13:15:44.447781+00:00",
+    "source": "sdk:rookie"
+  },
+  {
+    "trade_id": "f13038bd-f3ce-418d-a221-48450a5ca193",
+    "market_id": "4976f3ef-a132-49b2-9f8f-666884fcee5c",
+    "side": "no",
+    "action": "buy",
+    "amount": 12,
+    "venue": "sim",
+    "created_at": "2026-03-27T13:30:47.075423+00:00",
+    "source": "sdk:rookie"
+  },
+  {
+    "trade_id": "193ccebb-cfa4-463d-91b7-8c173332c9d7",
+    "market_id": "a0bef4f2-e899-4eec-bc3f-66f8a463bdfd",
+    "side": "yes",
+    "action": "buy",
+    "amount": 12,
+    "venue": "sim",
+    "created_at": "2026-03-27T13:45:53.371220+00:00",
+    "source": "sdk:rookie"
+  },
+  {
+    "trade_id": "6a7e3582-d0f9-42d5-9f0d-6cba8518e62d",
+    "market_id": "1590a55f-875a-479f-ab18-62a0b65cdf5e",
+    "side": "yes",
+    "action": "buy",
+    "amount": 12,
+    "venue": "sim",
+    "created_at": "2026-03-27T14:01:01.849158+00:00",
+    "source": "sdk:rookie"
+  },
+  {
+    "trade_id": "70a081fb-c0f5-43c5-bf8d-4e376b84dca6",
+    "market_id": "44d46440-ae44-4096-866a-c40d09b76af3",
+    "side": "no",
+    "action": "buy",
+    "amount": 12,
+    "venue": "sim",
+    "created_at": "2026-03-27T14:15:35.950816+00:00",
+    "source": "sdk:rookie"
+  },
+  {
+    "trade_id": "28d5d7e0-69ec-46f4-8407-170243be2b54",
+    "market_id": "959e6491-1e4d-42fe-894d-f460ed8c4869",
+    "side": "yes",
+    "action": "buy",
+    "amount": 12,
+    "venue": "sim",
+    "created_at": "2026-03-27T14:30:42.954126+00:00",
+    "source": "sdk:rookie"
+  },
+  {
+    "trade_id": "5cfb2e29-39ad-41b7-a662-5111d103746e",
+    "market_id": "47e0c262-6313-4399-aae3-db69425b4baa",
+    "side": "yes",
+    "action": "buy",
+    "amount": 12,
+    "venue": "sim",
+    "created_at": "2026-03-27T14:45:37.738565+00:00",
+    "source": "sdk:rookie"
   }
 ]
