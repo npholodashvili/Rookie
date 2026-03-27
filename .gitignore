@@ -15,3 +15,5 @@ data/decision_journal.jsonl
 data/game_state.json
 data/decision_journal.jsonl
 data/trade_history.json
+data/config_audit.jsonl
+data/monitor_policy_hints.json

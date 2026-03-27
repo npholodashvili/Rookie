@@ -1,6 +1,8 @@
 """Trade executor: fetch opportunities, execute trades, set risk monitor, persist history."""
 import json
+import math
 import os
+from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
@@ -15,6 +17,8 @@ from .config import (
     STRATEGY_CONFIG_PATH,
     TRADE_HISTORY_PATH,
 )
+from .calibration_runtime import runtime_min_expected_edge_boost
+from .config_audit import append_config_audit_event
 from .game_master import (
     apply_fee,
     check_death,
@@ -23,8 +27,10 @@ from .game_master import (
     save_game_state,
     trigger_death,
 )
+from .monitor_policy_hints import compute_monitor_policy_hints, maybe_auto_apply_monitor_hints
 from .openclaw_client import request_strategy_adjustment, wake_on_10th_trade
 from .offline_evaluator import evaluate_offline
+from .telemetry import build_telemetry_envelope, merge_decision_with_telemetry
 from .simmer_client import (
     _api_request,
     get_briefing,
@@ -95,6 +101,34 @@ def load_strategy_config() -> dict:
         "allow_fallback_activity_trade": True,
         "persist_auto_regime_to_disk": True,
         "skill": "built-in",
+        # Phase A–D: reliability, learning, ranking, velocity (safe defaults)
+        "use_calibration_runtime_adjustment": True,
+        "calibration_runtime_min_samples": 35,
+        "calibration_runtime_min_bin_n": 12,
+        "calibration_runtime_low_win_rate": 0.44,
+        "calibration_runtime_boost_step": 0.005,
+        "calibration_runtime_boost_cap": 0.02,
+        "evaluator_segment_by_market_type": True,
+        "evaluator_segment_min_samples": 18,
+        "evaluator_segment_merge_score_slack": 0.04,
+        "monitor_hints_min_monitor_samples": 10,
+        "monitor_hints_min_resolved_samples": 8,
+        "monitor_hints_underperform_gap": 0.02,
+        "auto_apply_monitor_hints": False,
+        "use_ensemble_ranking": True,
+        "ensemble_weights": {"edge": 0.55, "volume": 0.15, "resolution": 0.15, "slippage": 0.15},
+        "exploration_pick_second_on_near_tie": True,
+        "exploration_near_tie_edge_abs": 0.008,
+        # Portfolio / autonomy: theme caps, loss-streak pause, resolution sweet spot
+        "max_positions_per_market_type": 4,
+        "max_positions_per_theme_same_side": 3,
+        "loss_streak_pause_threshold": 4,
+        "loss_streak_pause_minutes": 45,
+        "preferred_resolution_hours_min": 8,
+        "preferred_resolution_hours_max": 96,
+        "ensemble_resolution_sweet_spot_bonus": 0.07,
+        # ISO datetime: ignore model_features rows before this for evaluator + calibration + hourly pairing (cold start)
+        "learning_effective_after": "",
     }
     if not STRATEGY_CONFIG_PATH.exists():
         return defaults
@@ -235,6 +269,70 @@ def _infer_market_type(question: str) -> str:
     return "other"
 
 
+def _is_loss_streak_entry_paused(state: dict) -> bool:
+    raw = state.get("loss_streak_entry_pause_until")
+    if not raw:
+        return False
+    try:
+        return datetime.now(timezone.utc) < datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+    except Exception:
+        return False
+
+
+def _record_market_theme_hint(state: dict, market_id: str, market_type: str) -> None:
+    hints = dict(state.get("market_theme_hints") or {})
+    hints[str(market_id)] = str(market_type or "unknown")
+    if len(hints) > 650:
+        for k in list(hints.keys())[:250]:
+            del hints[k]
+    state["market_theme_hints"] = hints
+    save_game_state(state)
+
+
+def _prune_market_theme_hint(state: dict, market_id: object) -> None:
+    mid = str(market_id or "")
+    if not mid:
+        return
+    hints = dict(state.get("market_theme_hints") or {})
+    hints.pop(mid, None)
+    state["market_theme_hints"] = hints
+    save_game_state(state)
+
+
+def _position_inferred_theme(pos: dict, state: dict) -> str:
+    q = pos.get("question") or pos.get("title") or pos.get("name") or ""
+    if q:
+        return _infer_market_type(str(q))
+    mid = pos.get("market_id")
+    if mid:
+        h = (state.get("market_theme_hints") or {}).get(str(mid))
+        if h:
+            return str(h)
+    return "unknown"
+
+
+def _portfolio_theme_counts(positions: list, venue: str, state: dict) -> tuple[dict, dict]:
+    by_t: Counter = Counter()
+    by_ts: Counter = Counter()
+    for p in positions:
+        if str(p.get("status") or "").lower() != "active":
+            continue
+        if (p.get("venue") or venue) != venue:
+            continue
+        if not _position_has_material_shares(p):
+            continue
+        theme = _position_inferred_theme(p, state)
+        if float(p.get("shares_yes") or 0) > 0:
+            side = "yes"
+        elif float(p.get("shares_no") or 0) > 0:
+            side = "no"
+        else:
+            continue
+        by_t[theme] += 1
+        by_ts[(theme, side)] += 1
+    return dict(by_t), dict(by_ts)
+
+
 def _update_daily_realized_and_pause(state: dict, config: dict, realized_pnl: float) -> dict:
     """Track daily realized PnL and enter review window when daily loss limit is reached."""
     today = _today_utc()
@@ -323,6 +421,9 @@ def execute_trade(
                 "amount": amount,
                 "mode": config.get("strategy_mode", "balanced"),
             })
+        st = load_game_state()
+        mt = str((feature_sample or {}).get("market_type") or "unknown")
+        _record_market_theme_hint(st, str(market_id), mt)
 
     return data
 
@@ -373,6 +474,10 @@ def _apply_strategy_optimization(state: dict, config: dict) -> dict:
             if changed and persist:
                 path.parent.mkdir(parents=True, exist_ok=True)
                 path.write_text(json.dumps(merged, indent=2))
+                append_config_audit_event(
+                    "auto_regime_persist",
+                    {"strategy_mode": updates.get("strategy_mode"), "updates": updates},
+                )
             elif changed and not persist:
                 append_decision_event(
                     {
@@ -415,10 +520,20 @@ def _maybe_auto_apply_evaluator(state: dict, config: dict) -> dict:
         time_split_train_fraction=float(config.get("evaluator_time_split_train_fraction", 0.75)),
         min_holdout_rows=int(config.get("evaluator_min_holdout_rows", 12)),
         holdout_min_delta=float(config.get("evaluator_holdout_min_delta", 0.02)),
+        segment_by_market_type=bool(config.get("evaluator_segment_by_market_type", False)),
+        evaluator_segment_min_samples=int(config.get("evaluator_segment_min_samples", 18)),
+        segment_merge_score_slack=float(config.get("evaluator_segment_merge_score_slack", 0.04)),
+        learning_effective_after=(str(config.get("learning_effective_after") or "").strip() or None),
     )
     state = load_game_state()
     state["last_model_eval_at"] = datetime.now(timezone.utc).isoformat()
     save_game_state(state)
+
+    if eval_result.get("ok") and int(eval_result.get("samples") or 0) >= 15:
+        try:
+            compute_monitor_policy_hints(config)
+        except Exception:
+            pass
 
     if not eval_result.get("ok"):
         return config
@@ -460,10 +575,26 @@ def _maybe_auto_apply_evaluator(state: dict, config: dict) -> dict:
         STRATEGY_CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
         STRATEGY_CONFIG_PATH.write_text(json.dumps(merged, indent=2))
 
+        append_config_audit_event(
+            "auto_apply_evaluator",
+            {
+                "updates": updates,
+                "eval_samples": eval_result.get("samples"),
+                "segment_merge_used": eval_result.get("segment_policy_merge_used"),
+                "holdout_passed": (eval_result.get("holdout_validation") or {}).get("passed"),
+            },
+        )
+
         state = load_game_state()
         state["last_model_apply_at"] = datetime.now(timezone.utc).isoformat()
         save_game_state(state)
-        return {**config, **merged}
+        cfg_out = {**config, **merged}
+        try:
+            hints = compute_monitor_policy_hints(cfg_out)
+            cfg_out = maybe_auto_apply_monitor_hints(cfg_out, hints)
+        except Exception:
+            pass
+        return cfg_out
     except Exception:
         return config
 
@@ -478,6 +609,88 @@ def _candidate_sort_key(expected_edge: float, volume_24h: float, abs_div: float,
     )
 
 
+def _ensemble_sort_tuple(
+    expected_edge: float,
+    volume_24h: float,
+    abs_div: float,
+    hours_left: Optional[float],
+    slip_ratio: float,
+    market_id: str,
+    config: dict,
+) -> tuple:
+    """Weighted score: edge, liquidity, time-to-resolution, slippage headroom (deterministic)."""
+    if not config.get("use_ensemble_ranking", True):
+        return _candidate_sort_key(expected_edge, volume_24h, abs_div, market_id)
+    hours = float(hours_left) if hours_left is not None and hours_left > 0 else 72.0
+    vol_norm = min(1.0, math.log1p(max(0.0, float(volume_24h))) / 14.0)
+    time_pref = 1.0 / (1.0 + hours / 48.0)
+    slip_pen = 1.0 - min(1.0, max(0.0, float(slip_ratio)))
+    w = config.get("ensemble_weights") or {}
+    e = float(w.get("edge", 0.55))
+    v = float(w.get("volume", 0.15))
+    t = float(w.get("resolution", 0.15))
+    s = float(w.get("slippage", 0.15))
+    score = float(expected_edge) * e + vol_norm * v + time_pref * t + slip_pen * s
+    lo = float(config.get("preferred_resolution_hours_min", 0) or 0)
+    hi = float(config.get("preferred_resolution_hours_max", 0) or 0)
+    spot = float(config.get("ensemble_resolution_sweet_spot_bonus", 0) or 0)
+    if spot > 0 and hi > lo > 0 and hours_left is not None and float(hours_left) > 0:
+        if lo <= float(hours_left) <= hi:
+            score += spot
+    return (-round(score, 10), -float(volume_24h), -float(abs_div), str(market_id))
+
+
+def _capital_velocity_metrics(
+    positions: list,
+    history: list,
+    hours: float = 24.0,
+) -> dict:
+    """Lightweight turnover / time-in-market signals for telemetry."""
+    now = datetime.now(timezone.utc)
+    cutoff_ts = now.timestamp() - hours * 3600
+    recent_buys = 0
+    for t in history:
+        if t.get("action") != "buy":
+            continue
+        dt = _parse_iso_datetime(t.get("created_at"))
+        if dt is None:
+            continue
+        ts = dt.timestamp() if dt.tzinfo else dt.replace(tzinfo=timezone.utc).timestamp()
+        if ts >= cutoff_ts:
+            recent_buys += 1
+    open_hours: list[float] = []
+    for p in positions:
+        if p.get("status") != "active":
+            continue
+        opened = _infer_position_opened_at(p, history)
+        if opened is None:
+            continue
+        o = opened if opened.tzinfo else opened.replace(tzinfo=timezone.utc)
+        open_hours.append((now - o).total_seconds() / 3600.0)
+    return {
+        "buys_last_24h": recent_buys,
+        "avg_open_hold_hours": round(sum(open_hours) / len(open_hours), 2) if open_hours else 0.0,
+        "open_positions_sampled": len(open_hours),
+    }
+
+
+def _attach_runtime_telemetry(
+    result: dict,
+    *,
+    component: str,
+    failure_code: Optional[str] = None,
+    extra: Optional[dict] = None,
+) -> dict:
+    tel = build_telemetry_envelope(component=component, failure_code=failure_code, extra=extra or {})
+    result["telemetry"] = tel
+    dec = result.get("decision")
+    if not isinstance(dec, dict):
+        result["decision"] = merge_decision_with_telemetry({}, tel)
+    else:
+        result["decision"] = merge_decision_with_telemetry(dec, tel)
+    return result
+
+
 def run_trading_cycle() -> dict:
     """
     Run one trading cycle: fetch opportunities, maybe trade, update game state.
@@ -488,11 +701,13 @@ def run_trading_cycle() -> dict:
 
     if not state.get("alive", True):
         result = {"alive": False, "state": state, "action": "none", "reason": "agent dead"}
+        _attach_runtime_telemetry(result, component="cycle", failure_code="agent_dead")
         append_decision_event({"type": "cycle", **result})
         return result
 
     if not api_key:
         result = {"alive": True, "state": state, "action": "none", "reason": "SIMMER_API_KEY not set"}
+        _attach_runtime_telemetry(result, component="cycle", failure_code="missing_api_key")
         append_decision_event({"type": "cycle", **result})
         return result
 
@@ -503,6 +718,12 @@ def run_trading_cycle() -> dict:
     config = _maybe_auto_apply_evaluator(state, config)
     # Refresh in-memory state in case evaluator/update helpers persisted new fields.
     state = load_game_state()
+    cal_boost = runtime_min_expected_edge_boost(config)
+    if cal_boost > 0:
+        config = {
+            **config,
+            "min_expected_edge_pct": float(config.get("min_expected_edge_pct", 0.02)) + cal_boost,
+        }
     if review_mode:
         # Soft safety mode: keep learning/trading but with much smaller risk.
         config = {
@@ -514,12 +735,24 @@ def run_trading_cycle() -> dict:
             "max_total_exposure_pct": min(float(config.get("max_total_exposure_pct", 0.60)), 0.20),
         }
 
+    if _is_loss_streak_entry_paused(state):
+        result = {
+            "alive": True,
+            "state": state,
+            "action": "skip",
+            "reason": "loss streak entry pause (new buys only; monitor still runs)",
+        }
+        _attach_runtime_telemetry(result, component="cycle", failure_code="loss_streak_pause")
+        append_decision_event({"type": "cycle", **result})
+        return result
+
     balance = get_effective_balance(api_key)
     positions = get_positions(api_key)
     active_exposure = _active_exposure_usd(positions)
 
     if balance <= 0:
         result = {"alive": True, "state": state, "action": "skip", "reason": "balance is 0"}
+        _attach_runtime_telemetry(result, component="cycle", failure_code="zero_balance")
         append_decision_event({"type": "cycle", **result})
         return result
     venue_for_cap = config.get("venue", "sim")
@@ -534,11 +767,13 @@ def run_trading_cycle() -> dict:
     )
     if active_count >= int(config.get("max_positions", 4)):
         result = {"alive": True, "state": state, "action": "skip", "reason": "max positions"}
+        _attach_runtime_telemetry(result, component="cycle", failure_code="max_positions")
         append_decision_event({"type": "cycle", **result})
         return result
     max_exposure = balance * float(config.get("max_total_exposure_pct", 0.60))
     if active_exposure >= max_exposure:
         result = {"alive": True, "state": state, "action": "skip", "reason": "max exposure"}
+        _attach_runtime_telemetry(result, component="cycle", failure_code="max_exposure")
         append_decision_event({"type": "cycle", **result})
         return result
 
@@ -556,12 +791,14 @@ def run_trading_cycle() -> dict:
             last = datetime.fromisoformat(last_trade.replace("Z", "+00:00"))
             if (datetime.now(timezone.utc) - last).total_seconds() < cooldown_min * 60:
                 result = {"alive": True, "state": state, "action": "skip", "reason": "cooldown"}
+                _attach_runtime_telemetry(result, component="cycle", failure_code="cooldown")
                 append_decision_event({"type": "cycle", **result})
                 return result
         except Exception:
             pass
 
     run_resolution_check()
+    state = load_game_state()
 
     opportunities = get_opportunities(
         api_key,
@@ -579,6 +816,7 @@ def run_trading_cycle() -> dict:
             "reason": "no opportunities found",
             "decision": {"scanned": 0, "skips": {"no-opportunities": 1}},
         }
+        _attach_runtime_telemetry(result, component="cycle", failure_code="no_opportunities")
         append_decision_event({"type": "cycle", **result})
         return result
 
@@ -606,6 +844,7 @@ def run_trading_cycle() -> dict:
 
     min_hours_to_resolution = float(config.get("min_hours_to_resolution", 4))
     max_hours_to_resolution = float(config.get("max_hours_to_resolution", 0))
+    theme_by_type, theme_by_side = _portfolio_theme_counts(positions, venue_for_cap, state)
     passing: list[dict] = []
     chosen_best: Optional[dict] = None
 
@@ -625,6 +864,7 @@ def run_trading_cycle() -> dict:
             skip_reasons["market-cooldown"] = skip_reasons.get("market-cooldown", 0) + 1
             continue
 
+        hours_left: Optional[float] = None
         resolves_at = opp.get("resolves_at") or opp.get("end_date") or ""
         if resolves_at:
             try:
@@ -667,6 +907,15 @@ def run_trading_cycle() -> dict:
 
         div = opp.get("divergence") or 0
         side = "yes" if div > 0 else "no"
+        cand_theme = _infer_market_type(str(opp.get("question") or opp.get("title") or opp.get("name") or ""))
+        max_pt = int(config.get("max_positions_per_market_type", 0))
+        if max_pt > 0 and theme_by_type.get(cand_theme, 0) >= max_pt:
+            skip_reasons["theme-cap"] = skip_reasons.get("theme-cap", 0) + 1
+            continue
+        max_ss = int(config.get("max_positions_per_theme_same_side", 0))
+        if max_ss > 0 and theme_by_side.get((cand_theme, side), 0) >= max_ss:
+            skip_reasons["theme-side-cap"] = skip_reasons.get("theme-side-cap", 0) + 1
+            continue
         edge = abs(div)
         fee_bps = ((context or {}).get("market") or {}).get("fee_rate_bps", 0) or 0
         est_fee = fee_bps / 10000
@@ -697,15 +946,17 @@ def run_trading_cycle() -> dict:
             skip_reasons["size-too-small"] = skip_reasons.get("size-too-small", 0) + 1
             continue
 
+        slip_ratio = (est_slip / max_slippage) if max_slippage > 0 else 0.0
         feature_sample = {
             "market_id": market_id,
             "question": str(opp.get("question") or opp.get("title") or opp.get("name") or ""),
-            "market_type": _infer_market_type(str(opp.get("question") or opp.get("title") or opp.get("name") or "")),
+            "market_type": cand_theme,
             "edge": edge,
             "expected_edge": expected_edge,
             "fee_bps": fee_bps,
             "slippage_pct": est_slip,
             "volume_24h": volume,
+            "hours_to_resolution": hours_left,
             "min_edge_divergence": float(config.get("min_edge_divergence", 0.03)),
             "min_expected_edge_pct": min_expected_edge,
             "min_liquidity_24h": min_liquidity,
@@ -719,12 +970,25 @@ def run_trading_cycle() -> dict:
                 "side": side,
                 "amount": amount,
                 "feature_sample": feature_sample,
-                "sort_key": _candidate_sort_key(expected_edge, volume, edge, str(market_id)),
+                "sort_key": _ensemble_sort_tuple(
+                    expected_edge, volume, edge, hours_left, slip_ratio, str(market_id), config
+                ),
             }
         )
 
+    picked_rank = 1
     if passing:
-        chosen_best = sorted(passing, key=lambda x: x["sort_key"])[0]
+        sorted_p = sorted(passing, key=lambda x: x["sort_key"])
+        chosen_best = sorted_p[0]
+        if config.get("exploration_pick_second_on_near_tie", True) and len(sorted_p) >= 2:
+            e0 = float(sorted_p[0]["feature_sample"]["expected_edge"])
+            e1 = float(sorted_p[1]["feature_sample"]["expected_edge"])
+            v0 = float(sorted_p[0]["feature_sample"]["volume_24h"])
+            v1 = float(sorted_p[1]["feature_sample"]["volume_24h"])
+            tie_eps = float(config.get("exploration_near_tie_edge_abs", 0.008))
+            if abs(e0 - e1) <= tie_eps and v1 > v0 * 1.1:
+                chosen_best = sorted_p[1]
+                picked_rank = 2
         trade_result = execute_trade(
             chosen_best["market_id"],
             chosen_best["side"],
@@ -756,38 +1020,49 @@ def run_trading_cycle() -> dict:
             if market_id and not _is_market_on_cooldown(state, market_id, market_reentry_cooldown):
                 div = top.get("divergence") or 0
                 side = "yes" if div > 0 else "no"
-                fallback_amount = min(float(config.get("fallback_trade_usd", 1.0)), max_pos_usd, max(1.0, balance * 0.01))
-                result = execute_trade(
-                    market_id,
-                    side,
-                    fallback_amount,
-                    dry_run=False,
-                    reasoning="Fallback activity trade after 2h inactivity",
-                    feature_sample={
-                        "market_id": market_id,
-                        "question": str(top.get("question") or top.get("title") or top.get("name") or ""),
-                        "market_type": _infer_market_type(str(top.get("question") or top.get("title") or top.get("name") or "")),
-                        "edge": abs(div),
-                        "expected_edge": abs(div),
-                        "fee_bps": 0,
-                        "slippage_pct": 0,
-                        "volume_24h": float(top.get("volume_24h") or 0),
-                        "min_edge_divergence": float(config.get("min_edge_divergence", 0.03)),
-                        "min_expected_edge_pct": float(config.get("min_expected_edge_pct", 0.02)),
-                        "min_liquidity_24h": float(config.get("min_liquidity_24h", 500)),
-                        "max_slippage_pct": float(config.get("max_slippage_pct", 0.05)),
-                        "review_mode": review_mode,
-                        "fallback_mode": True,
-                    },
-                )
-                if result:
-                    action = "traded"
-                    reason = "fallback trade"
-                    state["trades_count"] = state.get("trades_count", 0) + 1
-                    state["last_trade_at"] = datetime.now(timezone.utc).isoformat()
-                    state["cycles_without_trade"] = 0
-                    save_game_state(state)
-                    fallback_mode = True
+                fb_theme = _infer_market_type(str(top.get("question") or top.get("title") or top.get("name") or ""))
+                max_pt_fb = int(config.get("max_positions_per_market_type", 0))
+                if max_pt_fb > 0 and theme_by_type.get(fb_theme, 0) >= max_pt_fb:
+                    pass
+                else:
+                    max_ss_fb = int(config.get("max_positions_per_theme_same_side", 0))
+                    if max_ss_fb > 0 and theme_by_side.get((fb_theme, side), 0) >= max_ss_fb:
+                        pass
+                    else:
+                        fallback_amount = min(
+                            float(config.get("fallback_trade_usd", 1.0)), max_pos_usd, max(1.0, balance * 0.01)
+                        )
+                        result = execute_trade(
+                            market_id,
+                            side,
+                            fallback_amount,
+                            dry_run=False,
+                            reasoning="Fallback activity trade after 2h inactivity",
+                            feature_sample={
+                                "market_id": market_id,
+                                "question": str(top.get("question") or top.get("title") or top.get("name") or ""),
+                                "market_type": fb_theme,
+                                "edge": abs(div),
+                                "expected_edge": abs(div),
+                                "fee_bps": 0,
+                                "slippage_pct": 0,
+                                "volume_24h": float(top.get("volume_24h") or 0),
+                                "min_edge_divergence": float(config.get("min_edge_divergence", 0.03)),
+                                "min_expected_edge_pct": float(config.get("min_expected_edge_pct", 0.02)),
+                                "min_liquidity_24h": float(config.get("min_liquidity_24h", 500)),
+                                "max_slippage_pct": float(config.get("max_slippage_pct", 0.05)),
+                                "review_mode": review_mode,
+                                "fallback_mode": True,
+                            },
+                        )
+                        if result:
+                            action = "traded"
+                            reason = "fallback trade"
+                            state["trades_count"] = state.get("trades_count", 0) + 1
+                            state["last_trade_at"] = datetime.now(timezone.utc).isoformat()
+                            state["cycles_without_trade"] = 0
+                            save_game_state(state)
+                            fallback_mode = True
 
     if action != "traded":
         state["cycles_without_trade"] = state.get("cycles_without_trade", 0) + 1
@@ -801,6 +1076,7 @@ def run_trading_cycle() -> dict:
             "volume_24h": chosen_best["feature_sample"].get("volume_24h"),
         }
 
+    velocity = _capital_velocity_metrics(positions, load_trade_history(), 24.0)
     result = {
         "alive": state.get("alive", True),
         "state": state,
@@ -812,8 +1088,16 @@ def run_trading_cycle() -> dict:
             "picked": picked,
             "skips": skip_reasons,
             "fallback_mode": fallback_mode,
+            "calibration_runtime_boost": cal_boost,
+            "capital_velocity": velocity,
+            "candidate_rank": picked_rank if action == "traded" and passing else None,
+            "open_theme_counts": theme_by_type,
         },
     }
+    fail_code: Optional[str] = None
+    if action != "traded":
+        fail_code = "no_passing_candidates" if not passing else "no_trade_executed"
+    _attach_runtime_telemetry(result, component="cycle", failure_code=fail_code)
     append_decision_event({"type": "cycle", **result})
     return result
 
@@ -870,6 +1154,7 @@ def run_position_monitor() -> dict:
     api_key = os.environ.get("SIMMER_API_KEY")
     if not api_key:
         result = {"action": "none", "reason": "SIMMER_API_KEY not set", "closed": 0}
+        _attach_runtime_telemetry(result, component="monitor", failure_code="missing_api_key")
         append_decision_event({"type": "monitor", **result})
         return result
 
@@ -975,6 +1260,8 @@ def run_position_monitor() -> dict:
                     already.add(dedup_key)
                     state["processed_resolved_ids"] = list(already)[-500:]
                     save_game_state(state)
+                st2 = load_game_state()
+                _prune_market_theme_hint(st2, market_id)
                 append_model_label({
                     "market_id": market_id,
                     "side": side,
@@ -986,6 +1273,11 @@ def run_position_monitor() -> dict:
                 })
 
     result = {"action": "closed" if closed else "none", "reason": "ok", "closed": closed}
+    _attach_runtime_telemetry(
+        result,
+        component="monitor",
+        extra={"positions_checked": len([p for p in positions if p.get("status") == "active"])},
+    )
     append_decision_event({"type": "monitor", **result})
     return result
 
@@ -1031,6 +1323,7 @@ def run_resolution_check() -> int:
         config = load_strategy_config()
         _update_daily_realized_and_pause(state, config, pnl)
         state = _mark_market_cooldown(state, market_id)
+        _prune_market_theme_hint(state, market_id)
         append_model_label({
             "market_id": market_id,
             "side": side,

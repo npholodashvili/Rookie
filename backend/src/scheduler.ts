@@ -1,7 +1,6 @@
 import cron from "node-cron";
 import fs from "fs/promises";
 import path from "path";
-import { spawn } from "child_process";
 
 import { buildAdvisorReport, buildOpenPositionsTelegramText } from "./advisor.js";
 import { addLog } from "./logs.js";
@@ -21,9 +20,9 @@ export function initScheduler(projectRoot: string) {
   cron.schedule("*/15 * * * *", () => {
     runCycle(port);
   });
-  // Fee + report every 2 hours
+  // Fee + report every 2 hours (via API so logging/health matches other engine routes)
   cron.schedule("0 */2 * * *", () => {
-    runReport(projectRoot);
+    runReport(projectRoot, port);
   });
 
   // Daily advisory check (advice only, no strategy mutation)
@@ -31,6 +30,14 @@ export function initScheduler(projectRoot: string) {
   cron.schedule(advisorCron, () => {
     runAdvisor(projectRoot, port, "daily-cron");
   });
+
+  // Nightly calibration refresh (set CALIBRATE_DAILY_CRON=off to skip)
+  const calibrateCron = process.env.CALIBRATE_DAILY_CRON || "45 5 * * *";
+  if (String(calibrateCron).trim().toLowerCase() !== "off") {
+    cron.schedule(calibrateCron, () => {
+      runCalibrateNightly(port);
+    });
+  }
 
   // One-time test advisory after 5 minutes from startup.
   setTimeout(() => {
@@ -67,34 +74,51 @@ async function runCycle(port: number) {
   }
 }
 
-async function runReport(projectRoot: string) {
-  addLog("info", "Scheduler: running 2h report (fee -1 point)");
-  const py = process.platform === "win32" ? "python" : "python3";
-  const proc = spawn(py, ["-m", "engine.src.main", "report"], {
-    cwd: projectRoot,
-    env: { ...process.env },
-  });
-
-  let out = "";
-  let err = "";
-
-  proc.stdout?.on("data", (d) => (out += d.toString()));
-  proc.stderr?.on("data", (d) => (err += d.toString()));
-
-  proc.on("close", async () => {
-    try {
-      const result = JSON.parse(out || "{}");
-      const reportsDir = path.join(projectRoot, "data", "reports");
-      await fs.mkdir(reportsDir, { recursive: true });
-      const filename = `report-${new Date().toISOString().replace(/[:.]/g, "-")}.json`;
-      await fs.writeFile(path.join(reportsDir, filename), JSON.stringify(result, null, 2));
-      broadcast({ type: "report", payload: result });
-      addLog("success", `Scheduler: report saved (points: ${result?.state?.points ?? result?.report?.points ?? "—"})`);
-    } catch {
-      addLog("error", `Scheduler: report failed — ${err || "Engine error"}`);
-      broadcast({ type: "report", error: err || "Engine error" });
+async function runCalibrateNightly(port: number) {
+  addLog("info", "Scheduler: running nightly calibration");
+  try {
+    const r = await fetch(`http://127.0.0.1:${port}/api/learning/calibrate`, {
+      method: "POST",
+      signal: AbortSignal.timeout(120000),
+    });
+    const j = (await r.json().catch(() => ({}))) as { paired_samples?: number; ok?: boolean };
+    if (r.ok) {
+      addLog("success", `Scheduler: calibration ok (paired≈${j?.paired_samples ?? "—"})`);
+    } else {
+      addLog("warn", `Scheduler: calibration HTTP ${r.status}`);
     }
-  });
+  } catch (e) {
+    addLog("error", `Scheduler: calibration failed — ${String(e)}`);
+  }
+}
+
+async function runReport(projectRoot: string, port: number) {
+  addLog("info", "Scheduler: running 2h report (fee -1 point)");
+  try {
+    const r = await fetch(`http://127.0.0.1:${port}/api/engine/report`, { method: "POST" });
+    const result = (await r.json().catch(() => ({}))) as {
+      state?: { points?: number };
+      report?: { points?: number };
+      error?: string;
+    };
+    if (!r.ok) {
+      addLog("error", `Scheduler: report failed — HTTP ${r.status} ${result?.error ?? ""}`);
+      broadcast({ type: "report", error: result?.error || `HTTP ${r.status}` });
+      return;
+    }
+    const reportsDir = path.join(projectRoot, "data", "reports");
+    await fs.mkdir(reportsDir, { recursive: true });
+    const filename = `report-${new Date().toISOString().replace(/[:.]/g, "-")}.json`;
+    await fs.writeFile(path.join(reportsDir, filename), JSON.stringify(result, null, 2));
+    broadcast({ type: "report", payload: result });
+    addLog(
+      "success",
+      `Scheduler: report saved (points: ${result?.state?.points ?? result?.report?.points ?? "—"})`
+    );
+  } catch (e) {
+    addLog("error", `Scheduler: report failed — ${String(e)}`);
+    broadcast({ type: "report", error: String(e) });
+  }
 }
 
 async function runAdvisor(projectRoot: string, port: number, trigger: string) {

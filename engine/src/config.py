@@ -21,3 +21,9 @@ MAX_BUDGET_SIM = 200.0
 
 # Health file for backend to check engine status
 ENGINE_HEALTH_PATH = DATA_DIR / "engine_health.json"
+
+# Strategy / learning change audit (append-only JSONL)
+CONFIG_AUDIT_PATH = DATA_DIR / "config_audit.jsonl"
+
+# Read-only hints for exit parameters (Phase B)
+MONITOR_POLICY_HINTS_PATH = DATA_DIR / "monitor_policy_hints.json"

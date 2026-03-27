@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 from .config import MODEL_CALIBRATION_PATH, MODEL_FEATURES_PATH, MODEL_LABELS_PATH
+from .offline_evaluator import parse_learning_effective_after
 
 
 def _read_jsonl(path: Path) -> list[dict]:
@@ -58,6 +59,7 @@ def _bin_edge(x: float) -> str:
 def build_calibration_report(
     label_sources: Optional[list[str]] = None,
     return_clip: float = 3.0,
+    learning_effective_after: Optional[str] = None,
 ) -> dict:
     """
     Join features to latest labels; aggregate win rate and avg return by bins.
@@ -75,6 +77,9 @@ def build_calibration_report(
         key = f"{lb.get('market_id')}::{lb.get('side', 'unknown')}"
         label_map[key] = lb
 
+    cutoff = parse_learning_effective_after(learning_effective_after)
+    dropped_cutoff = 0
+
     joined: list[dict] = []
     for ft in features:
         key = f"{ft.get('market_id')}::{ft.get('side', 'unknown')}"
@@ -84,6 +89,15 @@ def build_calibration_report(
         src = str(lb.get("source") or "unknown")
         if filter_sources is not None and src not in filter_sources:
             continue
+        if cutoff is not None:
+            fts = _parse_ts(ft.get("timestamp"))
+            if fts is None:
+                dropped_cutoff += 1
+                continue
+            fo = fts if fts.tzinfo else fts.replace(tzinfo=timezone.utc)
+            if fo.astimezone(timezone.utc) < cutoff:
+                dropped_cutoff += 1
+                continue
         exp = float(ft.get("expected_edge", 0))
         edge = float(ft.get("edge", 0))
         ret = float(lb.get("return_pct", 0))
@@ -138,6 +152,10 @@ def build_calibration_report(
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "return_clip": return_clip,
         "label_sources_filter": list(label_sources) if filter_sources else None,
+        "learning_window": {
+            "cutoff": cutoff.isoformat() if cutoff else None,
+            "dropped_before_cutoff": dropped_cutoff,
+        },
         "paired_samples": len(joined),
         "by_expected_edge_bin": by_expected,
         "by_abs_divergence_bin": by_edge,

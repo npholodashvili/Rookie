@@ -4,7 +4,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
-from .config import GAME_STATE_PATH, GRAVEYARD_PATH, TRADE_HISTORY_PATH
+from .config import GAME_STATE_PATH, GRAVEYARD_PATH, STRATEGY_CONFIG_PATH, TRADE_HISTORY_PATH
 
 
 def load_game_state() -> dict:
@@ -40,6 +40,8 @@ def _default_game_state() -> dict:
         "last_model_eval_at": None,
         "last_model_apply_at": None,
         "market_reentry_cooldowns": {},
+        "market_theme_hints": {},
+        "loss_streak_entry_pause_until": None,
     }
 
 
@@ -154,6 +156,26 @@ def _duration_hours(state: dict) -> float:
         return 0.0
 
 
+def _strategy_snapshot_for_pause() -> dict:
+    try:
+        return json.loads(STRATEGY_CONFIG_PATH.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+
+
+def maybe_set_loss_streak_entry_pause(state: dict) -> None:
+    """Pause new entries (not monitor) after N consecutive losses — reads strategy file."""
+    cfg = _strategy_snapshot_for_pause()
+    th = int(cfg.get("loss_streak_pause_threshold", 0))
+    if th <= 0:
+        return
+    if int(state.get("consecutive_losses", 0)) < th:
+        return
+    minutes = max(5, int(cfg.get("loss_streak_pause_minutes", 45)))
+    until = datetime.now(timezone.utc).timestamp() + minutes * 60
+    state["loss_streak_entry_pause_until"] = datetime.fromtimestamp(until, timezone.utc).isoformat()
+
+
 def process_trade_resolution(
     state: dict,
     pnl: float,
@@ -170,11 +192,13 @@ def process_trade_resolution(
     if pnl > 0:
         state = apply_win(state)
         state["consecutive_losses"] = 0
+        state.pop("loss_streak_entry_pause_until", None)
         if cost_basis > 0 and (pnl / cost_basis) >= 0.5:
             state = apply_bonus(state)
     else:
         state = apply_loss(state)
         state["consecutive_losses"] = state.get("consecutive_losses", 0) + 1
+        maybe_set_loss_streak_entry_pause(state)
 
     save_game_state(state)
 

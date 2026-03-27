@@ -12,15 +12,43 @@ async function getJson(url: string): Promise<AnyRec> {
   }
 }
 
+function fmt(v: number): string {
+  return `${v >= 0 ? "+" : ""}${v.toFixed(2)}`;
+}
+
+function formatTopHoursBrief(topHours: any[], max = 2): string {
+  if (!Array.isArray(topHours) || !topHours.length) return "n/a";
+  return topHours
+    .slice(0, max)
+    .map((h) => `${String(h.hour).padStart(2, "0")}:00 ${Math.round(Number(h.win_rate || 0) * 100)}% (n=${Number(h.n || 0)})`)
+    .join(" · ");
+}
+
+function shortIso(s: string | null | undefined): string {
+  if (!s) return "";
+  const d = Date.parse(String(s));
+  if (!Number.isFinite(d)) return String(s).slice(0, 10);
+  return new Date(d).toISOString().slice(0, 10);
+}
+
+async function countOpenPositions(port: number): Promise<number> {
+  const data = await getJson(`http://127.0.0.1:${port}/api/simmer/positions`);
+  const raw = data.positions ?? data;
+  const list: AnyRec[] = Array.isArray(raw) ? raw : [];
+  return list.filter((p) => String(p.status || "").toLowerCase() === "active").length;
+}
+
 export async function buildAdvisorReport(port: number, projectRoot: string, trigger: string): Promise<{ report: AnyRec; text: string }> {
   const base = `http://127.0.0.1:${port}/api`;
-  const [health, learning, hourly, me, portfolio, gameState] = await Promise.all([
+  const [health, learning, hourly, me, portfolio, gameState, strategy, openN] = await Promise.all([
     getJson(`${base}/health`),
     getJson(`${base}/learning`),
     getJson(`${base}/hourly-outcomes`),
     getJson(`${base}/simmer/agents/me`),
     getJson(`${base}/simmer/portfolio`),
     getJson(`${base}/game-state`),
+    getJson(`${base}/strategy`),
+    countOpenPositions(port),
   ]);
 
   const pnlPortfolio = Number(portfolio?.sim_pnl ?? 0);
@@ -30,18 +58,30 @@ export async function buildAdvisorReport(port: number, projectRoot: string, trig
   const simmerLosses = Number(me?.loss_count ?? 0);
   const rookieWins = Number(gameState?.wins ?? 0);
   const rookieLosses = Number(gameState?.losses ?? 0);
+  const points = Number(gameState?.points ?? 0);
 
   const evalDelta = Number(learning?.baseline_vs_adaptive?.delta_score ?? learning?.model_eval?.improvement_over_baseline_score ?? 0);
   const evalConf = Number(learning?.baseline_vs_adaptive?.adaptive_confidence ?? learning?.model_eval?.best_policy?.confidence ?? 0);
-  const paired = Number(hourly?.paired_samples ?? 0);
+  const evalSamples = Number(learning?.model_eval?.samples ?? hourly?.paired_samples ?? 0);
+  const pairedAll = Number(hourly?.paired_samples_all ?? hourly?.paired_samples ?? 0);
   const topHours = Array.isArray(hourly?.summary?.top_hours) ? hourly.summary.top_hours : [];
+
+  const learnAfter = String(learning?.learning_effective_after ?? strategy?.learning_effective_after ?? "").trim();
+  const learnAfterShort = learnAfter ? shortIso(learnAfter) : "";
+
+  const dailyPaused = Boolean(learning?.paused);
+  const lossStreakPause = Boolean(
+    learning?.loss_streak_entry_pause_until && Date.parse(String(learning.loss_streak_entry_pause_until)) > Date.now()
+  );
 
   const problems: string[] = [];
   if (String(health?.backend?.status || "red") !== "green") problems.push("backend not green");
   if (String(health?.simmer?.status || "red") === "red") problems.push("simmer red");
-  if (Math.abs(pnlGap) > 25) problems.push("PnL gap agent vs portfolio is high");
-  if (paired < 20) problems.push("low paired learning samples");
-  if (evalDelta <= 0.01) problems.push("weak learning signal");
+  if (Math.abs(pnlGap) > 25) problems.push("large portfolio↔agent PnL gap (multi-agent/manual?)");
+  const pairedForAdvisor = Number(hourly?.paired_samples ?? 0);
+  if (pairedForAdvisor < 20) problems.push("few paired samples in learning window");
+  const minEvalN = 15;
+  if (evalSamples >= minEvalN && evalDelta <= 0.01) problems.push("weak auto-learn signal (δ≤0.01)");
 
   const verdict = problems.length === 0 ? "OK" : problems.length <= 2 ? "WATCH" : "ACTION_NEEDED";
   const now = new Date();
@@ -63,7 +103,10 @@ export async function buildAdvisorReport(port: number, projectRoot: string, trig
     },
     learning: {
       score: Number(learning?.score ?? 0),
-      paired_samples: paired,
+      paired_samples: pairedForAdvisor,
+      paired_samples_all: pairedAll,
+      learning_effective_after: learnAfter || null,
+      eval_samples: evalSamples,
       eval_delta_score: evalDelta,
       eval_confidence: evalConf,
       cycle_trade_rate_24h: Number(learning?.cycle_trade_rate_24h ?? 0),
@@ -72,6 +115,8 @@ export async function buildAdvisorReport(port: number, projectRoot: string, trig
       top_hours: topHours,
     },
     health,
+    open_positions: openN,
+    pauses: { daily: dailyPaused, loss_streak_entries: lossStreakPause },
   };
 
   const reportsDir = path.join(projectRoot, "data", "reports");
@@ -79,29 +124,38 @@ export async function buildAdvisorReport(port: number, projectRoot: string, trig
   const stamp = now.toISOString().replace(/[:.]/g, "-");
   await fs.writeFile(path.join(reportsDir, `advisor-${stamp}.json`), JSON.stringify(report, null, 2), "utf-8");
 
+  const learnLine = learnAfterShort
+    ? `Learn: eval n=${evalSamples} (pairs ${pairedForAdvisor}/${pairedAll} since ${learnAfterShort}) · δ=${evalDelta.toFixed(3)} · conf ${(evalConf * 100).toFixed(0)}%`
+    : `Learn: eval n=${evalSamples} · pairs ${pairedForAdvisor}${pairedAll > pairedForAdvisor ? `/${pairedAll} all-time` : ""} · δ=${evalDelta.toFixed(3)} · conf ${(evalConf * 100).toFixed(0)}%`;
+
+  const pauseBits = [
+    dailyPaused ? "daily pause" : null,
+    lossStreakPause ? "loss-streak buy pause" : null,
+  ].filter(Boolean);
+  const pauseStr = pauseBits.length ? pauseBits.join(" + ") : "none";
+
+  const tip =
+    !learnAfter && pairedAll > 40
+      ? "\nTip: set strategy `learning_effective_after` (Settings) to drop early trades from evaluator/calibration/hourly."
+      : "";
+
   const text =
-    `Rookie Advisor (${trigger})\n` +
-    `Verdict: ${verdict}\n` +
-    `(Economic KPI: portfolio PnL; game points are separate.)\n` +
-    `PnL: portfolio=${fmt(pnlPortfolio)} | agents/me=${fmt(pnlAgent)} | gap=${fmt(pnlGap)}\n` +
-    `W/L: Simmer ${simmerWins}/${simmerLosses} | Rookie ${rookieWins}/${rookieLosses}\n` +
-    `Learning: score=${Math.round(Number(learning?.score ?? 0))}, paired=${paired}, delta=${evalDelta.toFixed(3)}, conf=${(evalConf * 100).toFixed(0)}%\n` +
-    `Mode: ${String(learning?.strategy_mode ?? "unknown")} | 24h trade-rate=${(Number(learning?.cycle_trade_rate_24h ?? 0) * 100).toFixed(0)}%\n` +
-    `Top hours: ${formatTopHours(topHours)}\n` +
-    (problems.length ? `Issues: ${problems.join("; ")}` : "Issues: none");
+    `Rookie Advisor · ${verdict} · ${trigger}\n` +
+    `Money: portfolio ${fmt(pnlPortfolio)} (account) · agent/me ${fmt(pnlAgent)} · gap ${fmt(pnlGap)}\n` +
+    `Game: ${points} pts · Rookie ledger ${rookieWins}W/${rookieLosses}L · Simmer me ${simmerWins}W/${simmerLosses}L (different scope)\n` +
+    `Risk: ${String(learning?.strategy_mode ?? "?")} · pauses: ${pauseStr} · open positions: ${openN}\n` +
+    `${learnLine} · score ${Math.round(Number(learning?.score ?? 0))}\n` +
+    `Flow: 24h cycle trade ${(Number(learning?.cycle_trade_rate_24h ?? 0) * 100).toFixed(0)}% · hours: ${formatTopHoursBrief(topHours)}\n` +
+    (problems.length ? `Watch: ${problems.join(" · ")}` : "Watch: none") +
+    tip;
 
   return { report, text };
 }
 
-function fmt(v: number): string {
-  return `${v >= 0 ? "+" : ""}${v.toFixed(2)}`;
-}
-
-function formatTopHours(topHours: any[]): string {
-  if (!Array.isArray(topHours) || !topHours.length) return "n/a";
-  return topHours
-    .map((h) => `${String(h.hour).padStart(2, "0")}:00(${Math.round(Number(h.win_rate || 0) * 100)}%,n=${Number(h.n || 0)})`)
-    .join(", ");
+function truncate(s: string, max: number): string {
+  const t = s.replace(/\s+/g, " ").trim();
+  if (t.length <= max) return t;
+  return `${t.slice(0, max - 1)}…`;
 }
 
 function formatResolutionCountdown(pos: AnyRec): string {
@@ -125,12 +179,6 @@ function formatResolutionCountdown(pos: AnyRec): string {
   } catch {
     return "n/a";
   }
-}
-
-function truncate(s: string, max: number): string {
-  const t = s.replace(/\s+/g, " ").trim();
-  if (t.length <= max) return t;
-  return `${t.slice(0, max - 1)}…`;
 }
 
 /** Open Simmer positions for Telegram /positions (and typo /posittions). */
@@ -182,4 +230,3 @@ export async function buildOpenPositionsTelegramText(port: number): Promise<stri
 
   return lines.join("\n").trimEnd();
 }
-

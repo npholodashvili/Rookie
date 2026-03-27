@@ -42,6 +42,19 @@ export function dataRoutes(dataDir: string) {
   router.put("/strategy", async (req: Request, res: Response) => {
     try {
       await writeJson("strategy_config.json", req.body);
+      const auditPath = path.join(dataDir, "config_audit.jsonl");
+      const keys =
+        req.body && typeof req.body === "object" && !Array.isArray(req.body)
+          ? Object.keys(req.body as object)
+          : [];
+      const line =
+        JSON.stringify({
+          timestamp: new Date().toISOString(),
+          type: "manual_strategy_put",
+          source: "api",
+          keys,
+        }) + "\n";
+      await fs.appendFile(auditPath, line, "utf-8");
       res.json({ ok: true });
     } catch (e) {
       res.status(500).json({ error: String(e) });
@@ -259,6 +272,8 @@ export function dataRoutes(dataDir: string) {
         paused: Boolean(state.pause_until && Date.parse(String(state.pause_until)) > Date.now()),
         last_model_eval_at: state.last_model_eval_at ?? null,
         last_model_apply_at: state.last_model_apply_at ?? null,
+        loss_streak_entry_pause_until: state.loss_streak_entry_pause_until ?? null,
+        learning_effective_after: strategy.learning_effective_after ?? null,
         strategy_mode: strategy.strategy_mode || "balanced",
         auto_regime: Boolean(strategy.auto_regime ?? true),
         total_history_rows: Array.isArray(history) ? history.length : 0,
@@ -281,6 +296,28 @@ export function dataRoutes(dataDir: string) {
         ok: false,
         error: "No calibration file yet. POST /api/learning/calibrate or run: python -m engine.src.main calibrate",
       });
+    }
+  });
+
+  router.get("/learning/governance", async (_req: Request, res: Response) => {
+    const auditPath = path.join(dataDir, "config_audit.jsonl");
+    try {
+      const text = await fs.readFile(auditPath, "utf-8");
+      const lines = text
+        .trim()
+        .split("\n")
+        .filter(Boolean)
+        .slice(-50);
+      const events = lines.map((l) => {
+        try {
+          return JSON.parse(l) as Record<string, unknown>;
+        } catch {
+          return { raw: l };
+        }
+      });
+      res.json({ ok: true, events });
+    } catch {
+      res.json({ ok: true, events: [], message: "No config_audit.jsonl yet (auto-apply and saves will create it)" });
     }
   });
 
@@ -307,6 +344,10 @@ export function dataRoutes(dataDir: string) {
   // Decision-hour outcomes: bucket by trade ENTRY time, outcome attached when resolved.
   router.get("/hourly-outcomes", async (_req: Request, res: Response) => {
     try {
+      const strategy = await readJson("strategy_config.json").catch(() => ({}));
+      const learnCutMs = Date.parse(String(strategy.learning_effective_after || ""));
+      const learningCutoffMs = Number.isFinite(learnCutMs) ? learnCutMs : 0;
+
       const featuresPath = path.join(dataDir, "model_features.jsonl");
       const labelsPath = path.join(dataDir, "model_labels.jsonl");
       const apiKey = process.env.SIMMER_API_KEY;
@@ -392,6 +433,7 @@ export function dataRoutes(dataDir: string) {
       };
 
       let paired = 0;
+      let paired_all = 0;
       for (const ft of feats) {
         const key = keyOf(ft);
         const queue = labelsByKey.get(key) || [];
@@ -404,6 +446,9 @@ export function dataRoutes(dataDir: string) {
         if (idx < 0) idx = 0;
         const lb = queue.splice(idx, 1)[0];
         if (!lb) continue;
+
+        paired_all += 1;
+        if (learningCutoffMs > 0 && ftTs < learningCutoffMs) continue;
 
         const won = Boolean(lb.won);
         const ret = Number(lb.return_pct ?? 0);
@@ -454,7 +499,9 @@ export function dataRoutes(dataDir: string) {
 
       res.json({
         timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+        learning_effective_after: strategy.learning_effective_after ?? null,
         paired_samples: paired,
+        paired_samples_all: paired_all,
         features: features.length,
         labels: labels.length,
         summary: {

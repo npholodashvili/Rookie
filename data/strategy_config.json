@@ -44,5 +44,13 @@
   "allow_zero_divergence_fallback_scan": true,
   "allow_fallback_activity_trade": true,
   "persist_auto_regime_to_disk": true,
-  "skill": "built-in"
+  "skill": "built-in",
+  "max_positions_per_market_type": 4,
+  "max_positions_per_theme_same_side": 3,
+  "loss_streak_pause_threshold": 4,
+  "loss_streak_pause_minutes": 45,
+  "preferred_resolution_hours_min": 8,
+  "preferred_resolution_hours_max": 96,
+  "ensemble_resolution_sweet_spot_bonus": 0.07,
+  "learning_effective_after": "2026-03-21T15:00:00Z"
 }

@@ -64,7 +64,22 @@ def main() -> None:
             state = load_game_state()
             print(json.dumps(state))
         elif cmd == "evaluate":
-            result = evaluate_offline()
+            cfg = load_strategy_config()
+            ev = cfg.get("evaluator_label_sources")
+            ls = ev if isinstance(ev, list) else None
+            result = evaluate_offline(
+                return_clip=float(cfg.get("evaluator_return_clip", 3.0)),
+                label_sources=ls,
+                monitor_close_weight=float(cfg.get("evaluator_monitor_close_weight", 1.0)),
+                time_split_validate=bool(cfg.get("evaluator_time_split_validate", True)),
+                time_split_train_fraction=float(cfg.get("evaluator_time_split_train_fraction", 0.75)),
+                min_holdout_rows=int(cfg.get("evaluator_min_holdout_rows", 12)),
+                holdout_min_delta=float(cfg.get("evaluator_holdout_min_delta", 0.02)),
+                segment_by_market_type=bool(cfg.get("evaluator_segment_by_market_type", False)),
+                evaluator_segment_min_samples=int(cfg.get("evaluator_segment_min_samples", 18)),
+                segment_merge_score_slack=float(cfg.get("evaluator_segment_merge_score_slack", 0.04)),
+                learning_effective_after=(str(cfg.get("learning_effective_after") or "").strip() or None),
+            )
             print(json.dumps(result))
         elif cmd == "calibrate":
             cfg = load_strategy_config()
@@ -73,6 +88,7 @@ def main() -> None:
             result = build_calibration_report(
                 label_sources=ls,
                 return_clip=float(cfg.get("evaluator_return_clip", 3.0)),
+                learning_effective_after=(str(cfg.get("learning_effective_after") or "").strip() or None),
             )
             print(json.dumps(result))
         else:

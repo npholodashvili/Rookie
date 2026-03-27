@@ -46,6 +46,14 @@ const defaultStrategy = {
   allow_fallback_activity_trade: true,
   persist_auto_regime_to_disk: true,
   skill: "built-in",
+  max_positions_per_market_type: 4,
+  max_positions_per_theme_same_side: 3,
+  loss_streak_pause_threshold: 4,
+  loss_streak_pause_minutes: 45,
+  preferred_resolution_hours_min: 8,
+  preferred_resolution_hours_max: 96,
+  ensemble_resolution_sweet_spot_bonus: 0.07,
+  learning_effective_after: "",
 };
 
 interface AppConfig {
@@ -350,6 +358,104 @@ export function Settings() {
                 style={{ display: "block", width: "100%", marginTop: "0.25rem" }}
               />
             </label>
+            <p style={{ margin: "0.5rem 0 0", fontSize: "0.85rem", color: "var(--text-muted, #888)" }}>
+              Autonomy: theme caps, loss-streak pause (new entries only), resolution sweet spot for ranking. Set caps to 0 to disable.
+            </p>
+            <label>
+              Max open positions per theme (crypto/sports/…; 0 = off)
+              <input
+                type="number"
+                min="0"
+                step="1"
+                value={strategy.max_positions_per_market_type ?? 0}
+                onChange={(e) =>
+                  setStrategy({ ...strategy, max_positions_per_market_type: parseInt(e.target.value, 10) || 0 })
+                }
+                style={{ display: "block", width: "100%", marginTop: "0.25rem" }}
+              />
+            </label>
+            <label>
+              Max positions per theme + side (0 = off)
+              <input
+                type="number"
+                min="0"
+                step="1"
+                value={strategy.max_positions_per_theme_same_side ?? 0}
+                onChange={(e) =>
+                  setStrategy({ ...strategy, max_positions_per_theme_same_side: parseInt(e.target.value, 10) || 0 })
+                }
+                style={{ display: "block", width: "100%", marginTop: "0.25rem" }}
+              />
+            </label>
+            <label>
+              Loss streak → pause new buys (0 = off; consecutive losses)
+              <input
+                type="number"
+                min="0"
+                step="1"
+                value={strategy.loss_streak_pause_threshold ?? 0}
+                onChange={(e) =>
+                  setStrategy({ ...strategy, loss_streak_pause_threshold: parseInt(e.target.value, 10) || 0 })
+                }
+                style={{ display: "block", width: "100%", marginTop: "0.25rem" }}
+              />
+            </label>
+            <label>
+              Loss-streak pause duration (minutes)
+              <input
+                type="number"
+                min="5"
+                step="1"
+                value={strategy.loss_streak_pause_minutes ?? 45}
+                onChange={(e) =>
+                  setStrategy({ ...strategy, loss_streak_pause_minutes: parseInt(e.target.value, 10) || 45 })
+                }
+                style={{ display: "block", width: "100%", marginTop: "0.25rem" }}
+              />
+            </label>
+            <label>
+              Preferred resolution window — min hours (0 = no sweet spot)
+              <input
+                type="number"
+                min="0"
+                step="1"
+                value={strategy.preferred_resolution_hours_min ?? 0}
+                onChange={(e) =>
+                  setStrategy({ ...strategy, preferred_resolution_hours_min: parseInt(e.target.value, 10) || 0 })
+                }
+                style={{ display: "block", width: "100%", marginTop: "0.25rem" }}
+              />
+            </label>
+            <label>
+              Preferred resolution window — max hours (for ranking sweet spot)
+              <input
+                type="number"
+                min="0"
+                step="1"
+                value={strategy.preferred_resolution_hours_max ?? 0}
+                onChange={(e) =>
+                  setStrategy({ ...strategy, preferred_resolution_hours_max: parseInt(e.target.value, 10) || 0 })
+                }
+                style={{ display: "block", width: "100%", marginTop: "0.25rem" }}
+              />
+            </label>
+            <label>
+              Ensemble bonus inside preferred window (e.g. 0.07)
+              <input
+                type="number"
+                min="0"
+                max="0.3"
+                step="0.01"
+                value={strategy.ensemble_resolution_sweet_spot_bonus ?? 0}
+                onChange={(e) =>
+                  setStrategy({
+                    ...strategy,
+                    ensemble_resolution_sweet_spot_bonus: parseFloat(e.target.value) || 0,
+                  })
+                }
+                style={{ display: "block", width: "100%", marginTop: "0.25rem" }}
+              />
+            </label>
             <label>
               Daily loss limit ($) before pause
               <input
@@ -424,6 +530,16 @@ export function Settings() {
                 onChange={(e) => setStrategy({ ...strategy, auto_apply_evaluator: e.target.checked })}
               />
               Auto-apply offline evaluator policy updates
+            </label>
+            <label>
+              Learning effective after (ISO UTC, optional — drops older trades from evaluator, calibration, hourly)
+              <input
+                type="text"
+                placeholder="2025-03-01T00:00:00Z"
+                value={strategy.learning_effective_after ?? ""}
+                onChange={(e) => setStrategy({ ...strategy, learning_effective_after: e.target.value.trim() })}
+                style={{ display: "block", width: "100%", marginTop: "0.25rem", fontFamily: "monospace" }}
+              />
             </label>
             <label>
               Evaluator interval (minutes)

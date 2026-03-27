@@ -1,5 +1,6 @@
 """Offline evaluator for Rookie model features/labels."""
 import json
+from collections import defaultdict
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -21,6 +22,7 @@ class EvalRow:
     return_pct: float
     weight: float = 1.0
     feature_ts: Optional[datetime] = None
+    market_type: str = "unknown"
 
 
 def _read_jsonl(path: Path) -> list[dict]:
@@ -50,6 +52,41 @@ def _parse_feature_ts(raw: object) -> Optional[datetime]:
         return datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
     except Exception:
         return None
+
+
+def parse_learning_effective_after(raw: object) -> Optional[datetime]:
+    """ISO datetime from strategy; None = use all history for learning."""
+    if raw is None:
+        return None
+    s = str(raw).strip()
+    if not s:
+        return None
+    try:
+        dt = datetime.fromisoformat(s.replace("Z", "+00:00"))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone(timezone.utc)
+    except Exception:
+        return None
+
+
+def filter_eval_rows_by_learning_window(rows: list[EvalRow], cutoff: Optional[datetime]) -> tuple[list[EvalRow], int]:
+    """Drop rows whose feature_ts is before cutoff (and rows with no ts when cutoff set). Returns (filtered, dropped_count)."""
+    if cutoff is None:
+        return rows, 0
+    out: list[EvalRow] = []
+    dropped = 0
+    for r in rows:
+        if r.feature_ts is None:
+            dropped += 1
+            continue
+        ts = r.feature_ts if r.feature_ts.tzinfo else r.feature_ts.replace(tzinfo=timezone.utc)
+        ts = ts.astimezone(timezone.utc)
+        if ts < cutoff:
+            dropped += 1
+            continue
+        out.append(r)
+    return out, dropped
 
 
 def _wilson_lower_bound(p: float, n: int, z: float = 1.96) -> float:
@@ -122,6 +159,45 @@ def _grid_search_best(train_rows: list[EvalRow]) -> tuple[dict, dict]:
     return baseline, best
 
 
+def _merge_segment_policies(
+    train_rows: list[EvalRow],
+    best_train: dict,
+    min_samples: int,
+    score_slack: float = 0.04,
+) -> tuple[dict, bool]:
+    """
+    When enough rows exist per market_type, merge per-segment grid bests into one stricter policy.
+    Returns (best_train_dict, used_merge).
+    """
+    by_type: dict[str, list[EvalRow]] = defaultdict(list)
+    for r in train_rows:
+        by_type[r.market_type or "unknown"].append(r)
+    seg_policies: list[dict] = []
+    for sub in by_type.values():
+        if len(sub) < min_samples:
+            continue
+        _, b = _grid_search_best(sub)
+        if int(b.get("n", 0)) >= 5:
+            seg_policies.append(b)
+    if len(seg_policies) < 1:
+        return best_train, False
+    te = max(float(p["min_expected_edge_pct"]) for p in seg_policies)
+    ts = min(float(p["max_slippage_pct"]) for p in seg_policies)
+    tl = max(float(p["min_liquidity_24h"]) for p in seg_policies)
+    merged_score = _score_policy_on_rows(train_rows, te, ts, tl)
+    if int(merged_score.get("n", 0)) < 5:
+        return best_train, False
+    merged_candidate = {
+        "min_expected_edge_pct": te,
+        "max_slippage_pct": ts,
+        "min_liquidity_24h": tl,
+        **merged_score,
+    }
+    if float(merged_score["score"]) >= float(best_train["score"]) - score_slack:
+        return merged_candidate, True
+    return best_train, False
+
+
 def evaluate_offline(
     return_clip: float = 3.0,
     label_sources: Optional[list[str]] = None,
@@ -130,6 +206,10 @@ def evaluate_offline(
     time_split_train_fraction: float = 0.75,
     min_holdout_rows: int = 12,
     holdout_min_delta: float = 0.02,
+    segment_by_market_type: bool = False,
+    evaluator_segment_min_samples: int = 18,
+    segment_merge_score_slack: float = 0.04,
+    learning_effective_after: Optional[str] = None,
 ) -> dict:
     """
     Evaluate threshold policies using executed-feature rows joined to labels.
@@ -181,16 +261,26 @@ def evaluate_offline(
                 return_pct=_clamp(float(lb.get("return_pct", 0)), -1.0, return_clip),
                 weight=w,
                 feature_ts=_parse_feature_ts(ft.get("timestamp")),
+                market_type=str(ft.get("market_type") or "unknown"),
             )
         )
+
+    cutoff = parse_learning_effective_after(learning_effective_after)
+    n_joined_before_window = len(rows)
+    rows, dropped_before_cutoff = filter_eval_rows_by_learning_window(rows, cutoff)
 
     if not rows:
         result = {
             "ok": True,
-            "message": "features collected, waiting for resolved labels",
+            "message": "features collected, waiting for resolved labels (or none after learning window)",
             "features": len(features),
             "labels": len(labels),
             "samples": 0,
+            "learning_window": {
+                "cutoff": cutoff.isoformat() if cutoff else None,
+                "joined_before_filter": n_joined_before_window,
+                "dropped_before_cutoff": dropped_before_cutoff,
+            },
         }
         MODEL_EVAL_PATH.write_text(json.dumps(result, indent=2), encoding="utf-8")
         return result
@@ -233,6 +323,14 @@ def evaluate_offline(
         train_rows = rows
 
     baseline_train, best_train = _grid_search_best(train_rows)
+    segment_merge_used = False
+    if segment_by_market_type:
+        best_train, segment_merge_used = _merge_segment_policies(
+            train_rows,
+            best_train,
+            max(8, int(evaluator_segment_min_samples)),
+            score_slack=float(segment_merge_score_slack),
+        )
 
     baseline_full = _score_policy_on_rows(rows, 0.0, 1.0, 0.0)
     best_full = {
@@ -282,6 +380,13 @@ def evaluate_offline(
         "return_clip": return_clip,
         "label_sources_filter": list(label_sources) if filter_sources else None,
         "monitor_close_weight": mc_w,
+        "segment_by_market_type": bool(segment_by_market_type),
+        "segment_policy_merge_used": segment_merge_used,
+        "learning_window": {
+            "cutoff": cutoff.isoformat() if cutoff else None,
+            "joined_before_filter": n_joined_before_window,
+            "dropped_before_cutoff": dropped_before_cutoff,
+        },
         "samples": len(rows),
         "features": len(features),
         "labels": len(labels),

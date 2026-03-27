@@ -9,13 +9,15 @@ import { broadcast } from "../websocket.js";
 import { getStatus, setLastCycle } from "../engineStatus.js";
 
 const SKILL_SCRIPTS: Record<string, string> = {
-  "polymarket-ai-divergence": "Skills/polymarket-ai-divergence/ai_divergence.py",
-  "polymarket-weather-trader": "Skills/polymarket-weather-trader/weather_trader.py",
+  "polymarket-ai-divergence": "skills/polymarket-ai-divergence/ai_divergence.py",
+  "polymarket-weather-trader": "skills/polymarket-weather-trader/weather_trader.py",
 };
 
 export function engineRoutes(projectRoot: string) {
   const router = express.Router();
   const dataDir = path.join(projectRoot, "data");
+
+  const TELEMETRY_SCHEMA_VERSION = 1;
 
   const runEngine = (cmd: string): Promise<object> => {
     return new Promise((resolve, reject) => {
@@ -32,11 +34,22 @@ export function engineRoutes(projectRoot: string) {
       proc.stderr?.on("data", (d) => (err += d.toString()));
 
       proc.on("close", (code) => {
+        let parsed: Record<string, unknown> = {};
         try {
-          resolve(JSON.parse(out || "{}"));
+          parsed = JSON.parse((out || "").trim() || "{}") as Record<string, unknown>;
         } catch {
-          reject(new Error(err || "Engine error"));
+          reject(new Error(err.trim() || `Engine non-JSON stdout (exit ${code ?? "?"})`));
+          return;
         }
+        if (code !== 0) {
+          const msg =
+            typeof parsed.error === "string" && parsed.error
+              ? parsed.error
+              : err.trim() || `engine exited with code ${code}`;
+          reject(new Error(msg));
+          return;
+        }
+        resolve(parsed);
       });
     });
   };
@@ -88,12 +101,27 @@ export function engineRoutes(projectRoot: string) {
 
       proc.on("close", (code) => {
         try {
-          const parsed = JSON.parse(out || "{}");
+          const parsed = JSON.parse((out || "").trim() || "{}") as {
+            automaton?: { trades_executed?: number; skip_reason?: string };
+            decision?: Record<string, unknown>;
+          };
+          const telemetry = {
+            schema_version: TELEMETRY_SCHEMA_VERSION,
+            primary_kpi: "economic_pnl_simmer",
+            component: "skill_cycle",
+            cycle_source: "skill",
+            skill: skillSlug,
+            exit_code: code,
+          };
+          const baseDecision =
+            typeof parsed.decision === "object" && parsed.decision !== null ? { ...parsed.decision } : {};
           resolve({
             action: parsed.automaton?.trades_executed ? "traded" : "none",
             reason: parsed.automaton?.skip_reason || (code === 0 ? "ok" : err || "skill exited"),
             alive: true,
             state: {},
+            decision: { ...baseDecision, telemetry },
+            telemetry,
           });
         } catch {
           resolve({
@@ -101,6 +129,24 @@ export function engineRoutes(projectRoot: string) {
             reason: err || "Skill output not parseable",
             alive: true,
             state: {},
+            decision: {
+              telemetry: {
+                schema_version: TELEMETRY_SCHEMA_VERSION,
+                primary_kpi: "economic_pnl_simmer",
+                component: "skill_cycle",
+                cycle_source: "skill",
+                skill: skillSlug,
+                failure_code: "parse_error",
+              },
+            },
+            telemetry: {
+              schema_version: TELEMETRY_SCHEMA_VERSION,
+              primary_kpi: "economic_pnl_simmer",
+              component: "skill_cycle",
+              cycle_source: "skill",
+              skill: skillSlug,
+              failure_code: "parse_error",
+            },
           });
         }
       });
@@ -117,10 +163,19 @@ export function engineRoutes(projectRoot: string) {
       } catch {}
 
       const skill = strategy.skill || "built-in";
-      const runResult =
-        skill !== "built-in" && SKILL_SCRIPTS[skill]
-          ? await runSkill(skill)
-          : await runEngine("cycle");
+      let runResult: object;
+      if (skill !== "built-in" && SKILL_SCRIPTS[skill]) {
+        const skillResult = await runSkill(skill);
+        let postMonitor: object = {};
+        try {
+          postMonitor = (await runEngine("monitor")) as object;
+        } catch (e) {
+          addLog("warn", `Post-skill monitor: ${String(e)}`);
+        }
+        runResult = { ...skillResult, post_skill_monitor: postMonitor };
+      } else {
+        runResult = (await runEngine("cycle")) as object;
+      }
 
       const result = runResult as {
         action?: string;
