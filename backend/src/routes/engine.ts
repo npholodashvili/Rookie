@@ -6,7 +6,7 @@ import path from "path";
 
 import { addLog } from "../logs.js";
 import { broadcast } from "../websocket.js";
-import { getStatus, setLastCycle } from "../engineStatus.js";
+import { getStatus, setLastCycle, getPaused, setPaused } from "../engineStatus.js";
 
 const SKILL_SCRIPTS: Record<string, string> = {
   "polymarket-ai-divergence": "skills/polymarket-ai-divergence/ai_divergence.py",
@@ -248,6 +248,25 @@ export function engineRoutes(projectRoot: string) {
       addLog("error", `Report failed: ${String(e)}`);
       res.status(500).json({ error: String(e) });
     }
+  });
+
+  router.post("/pause", (req: Request, res: Response) => {
+    const reason = (req.body as { reason?: string })?.reason ?? "manual pause via API";
+    setPaused(true, reason);
+    addLog("warn", `Engine paused: ${reason}`);
+    broadcast({ type: "paused", payload: { paused: true, reason } });
+    res.json({ ok: true, paused: true, reason });
+  });
+
+  router.post("/resume", (_req: Request, res: Response) => {
+    setPaused(false);
+    addLog("info", "Engine resumed");
+    broadcast({ type: "paused", payload: { paused: false } });
+    res.json({ ok: true, paused: false });
+  });
+
+  router.get("/paused", (_req: Request, res: Response) => {
+    res.json(getPaused());
   });
 
   return router;

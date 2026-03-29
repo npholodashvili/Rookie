@@ -86,6 +86,7 @@ interface GameState {
   losses?: number;
   trades_count?: number;
   alive?: boolean;
+  position_peak_pnl?: Record<string, number>;
 }
 
 interface AgentMe {
@@ -165,10 +166,47 @@ export function Dashboard() {
   const [countdown, setCountdown] = useState("");
   const [loading, setLoading] = useState(true);
   const [fetchError, setFetchError] = useState(false);
+  const [paused, setPausedState] = useState(false);
+  const [pauseReason, setPauseReason] = useState<string | null>(null);
+  const [alignment, setAlignment] = useState<Record<string, any> | null>(null);
+  const [alignLoading, setAlignLoading] = useState(false);
+
+  const fetchPausedState = async () => {
+    try {
+      const r = await fetch(`${API}/engine/paused`);
+      if (r.ok) {
+        const d = await r.json();
+        setPausedState(!!d.paused);
+        setPauseReason(d.reason ?? null);
+      }
+    } catch {}
+  };
+
+  const togglePause = async () => {
+    const endpoint = paused ? `${API}/engine/resume` : `${API}/engine/pause`;
+    const body = paused ? undefined : JSON.stringify({ reason: "Manual pause via UI" });
+    await fetch(endpoint, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body,
+    });
+    await fetchPausedState();
+  };
+
+  const runAlignment = async () => {
+    setAlignLoading(true);
+    try {
+      const r = await fetch(`${API}/audit/alignment`);
+      if (r.ok) setAlignment(await r.json());
+    } finally {
+      setAlignLoading(false);
+    }
+  };
 
   const fetchData = async () => {
     setLoading(true);
     setFetchError(false);
+    fetchPausedState();
     try {
       const [gs, am, pos, tr, status, pf, learn, cal] = await Promise.all([
         fetch(`${API}/game-state`)
@@ -203,13 +241,17 @@ export function Dashboard() {
   };
 
   useWebSocket((raw: unknown) => {
-    const data = (raw || {}) as { type?: string; payload?: { state?: GameState } };
+    const data = (raw || {}) as { type?: string; payload?: { state?: GameState; paused?: boolean; reason?: string } };
     if (data.type === "state" && data.payload?.state) {
       setGameState(data.payload.state);
       fetchData();
     }
     if (data.type === "report" && data.payload) {
       fetchData();
+    }
+    if (data.type === "paused" && data.payload) {
+      setPausedState(!!data.payload.paused);
+      setPauseReason(data.payload.reason ?? null);
     }
   });
 
@@ -405,15 +447,45 @@ export function Dashboard() {
       </div>
 
       <div style={{ display: "flex", flexDirection: "column", gap: "1rem", minWidth: 0 }}>
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-        <h2 style={{ margin: 0 }}>Dashboard</h2>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: "0.5rem" }}>
+        <div style={{ display: "flex", alignItems: "center", gap: "0.75rem" }}>
+          <h2 style={{ margin: 0 }}>Dashboard</h2>
+          {paused && (
+            <span style={{
+              background: "rgba(220,160,40,0.15)",
+              color: "var(--yellow, #e5a040)",
+              border: "1px solid rgba(220,160,40,0.4)",
+              borderRadius: 4,
+              fontSize: "0.75rem",
+              padding: "0.15rem 0.5rem",
+              fontWeight: 600,
+            }}>
+              ⏸ PAUSED{pauseReason ? ` · ${pauseReason}` : ""}
+            </span>
+          )}
+        </div>
         <div style={{ display: "flex", gap: "0.5rem", alignItems: "center" }}>
           <span style={{ fontSize: "0.875rem", color: "var(--text-muted)" }}>
-            Last updated: {lastUpdated ? new Date(lastUpdated).toLocaleTimeString() : "—"}
+            {lastUpdated ? new Date(lastUpdated).toLocaleTimeString() : "—"}
           </span>
           <button onClick={fetchData}>Refresh</button>
           <button
+            style={{
+              background: paused ? "rgba(80,180,120,0.15)" : "rgba(220,80,80,0.12)",
+              color: paused ? "var(--green)" : "var(--red)",
+              border: `1px solid ${paused ? "rgba(80,180,120,0.4)" : "rgba(220,80,80,0.35)"}`,
+              borderRadius: 4,
+              padding: "0.35rem 0.75rem",
+              cursor: "pointer",
+              fontWeight: 600,
+            }}
+            onClick={togglePause}
+          >
+            {paused ? "▶ Resume" : "⏸ Pause"}
+          </button>
+          <button
             className="primary"
+            disabled={paused}
             onClick={async () => {
               await fetch("/api/engine/cycle", { method: "POST" });
               fetchData();
@@ -458,21 +530,64 @@ export function Dashboard() {
         </div>
       </div>
 
+      <div className="card" style={{ display: "flex", flexDirection: "column", gap: "0.5rem" }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+          <h3 style={{ margin: 0, fontSize: "0.9rem" }}>Alignment Audit</h3>
+          <button style={{ fontSize: "0.75rem", padding: "0.2rem 0.5rem" }} onClick={runAlignment} disabled={alignLoading}>
+            {alignLoading ? "Checking…" : "Run Audit"}
+          </button>
+        </div>
+        {!alignment ? (
+          <p style={{ margin: 0, fontSize: "0.8rem", color: "var(--text-muted)" }}>Click "Run Audit" to compare local state vs Simmer.</p>
+        ) : (
+          <div style={{ fontSize: "0.8rem", lineHeight: 1.5 }}>
+            <div style={{ fontWeight: 600, color: alignment.aligned ? "var(--green)" : "var(--yellow, #e5a040)" }}>
+              {alignment.aligned ? "✅ Aligned" : `⚠️ ${alignment.divergences?.length} divergence(s)`}
+            </div>
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "0.25rem 1rem", marginTop: "0.35rem" }}>
+              <div>
+                <span style={{ color: "var(--text-muted)" }}>Simmer:</span>{" "}
+                {alignment.simmer?.active_positions ?? 0} open · {alignment.simmer?.wins ?? 0}W/{alignment.simmer?.losses ?? 0}L · PnL {Number(alignment.simmer?.pnl ?? 0) >= 0 ? "+" : ""}{Number(alignment.simmer?.pnl ?? 0).toFixed(2)}
+              </div>
+              <div>
+                <span style={{ color: "var(--text-muted)" }}>Local:</span>{" "}
+                {alignment.local?.buys ?? 0} buys · {alignment.local?.wins ?? 0}W/{alignment.local?.losses ?? 0}L · {alignment.local?.points ?? 0}pts
+              </div>
+            </div>
+            {alignment.divergences?.length > 0 && (
+              <ul style={{ margin: "0.35rem 0 0 0", paddingLeft: "1.1rem", color: "var(--yellow, #e5a040)" }}>
+                {alignment.divergences.map((d: string, i: number) => <li key={i}>{d}</li>)}
+              </ul>
+            )}
+          </div>
+        )}
+      </div>
+
       <div className="card">
         <h3 style={{ margin: "0 0 0.5rem 0" }}>Open Positions</h3>
         {activePositions.length === 0 ? (
           <p style={{ color: "var(--text-muted)", margin: 0 }}>No open positions</p>
         ) : (
           <ul style={{ margin: 0, paddingLeft: "1.25rem" }}>
-            {activePositions.slice(0, 10).map((p, i) => (
-              <li key={i}>
-                {(p.question || "").slice(0, 60)}{(p.question || "").length > 60 ? "..." : ""} — P&L: {(p.pnl ?? 0).toFixed(2)}
-                {" · "}
-                <span style={{ color: "var(--text-muted)", fontSize: "0.875rem" }}>
-                  Resolves: {formatResolutionTimer(p.resolves_at, p.time_to_resolution)}
-                </span>
-              </li>
-            ))}
+            {activePositions.slice(0, 10).map((p, i) => {
+              const side = (p.shares_yes ?? 0) > 0 ? "yes" : "no";
+              const posKey = p.market_id ? `${p.market_id}:${side}` : null;
+              const peak = posKey ? (gameState?.position_peak_pnl?.[posKey] ?? null) : null;
+              return (
+                <li key={i}>
+                  {(p.question || "").slice(0, 60)}{(p.question || "").length > 60 ? "..." : ""} — P&L: {(p.pnl ?? 0).toFixed(2)}
+                  {peak !== null && peak > 0 && (
+                    <span style={{ color: "var(--text-muted)", fontSize: "0.75rem", marginLeft: "0.35rem" }}>
+                      ↑ peak {(peak * 100).toFixed(1)}%
+                    </span>
+                  )}
+                  {" · "}
+                  <span style={{ color: "var(--text-muted)", fontSize: "0.875rem" }}>
+                    Resolves: {formatResolutionTimer(p.resolves_at, p.time_to_resolution)}
+                  </span>
+                </li>
+              );
+            })}
           </ul>
         )}
       </div>

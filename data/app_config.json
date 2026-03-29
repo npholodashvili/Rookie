@@ -2,6 +2,6 @@
   "openclaw_url": "http://192.168.1.21:18789",
   "openclaw_hooks_path": "/hooks",
   "openclaw_hooks_token": "51f22318de12d013b322966e41dfc08ff6d1b0b743cefdce   Why your status bar/app may still be unhappy:  - logs show token_mismatch  - so at least one client is still trying the old token",
-  "telegram_bot_token": "8698011562:AAHRA7JHHCizyLIcfzO01M7g_W1JNMLgb08",
-  "telegram_chat_id": "15411546"
+  "telegram_bot_token": "8514707673:AAGQud8K5ah1JWoF1eyggWPGGBgs4iDbRQE",
+  "telegram_chat_id": ""
 }

@@ -31,11 +31,20 @@ function shortIso(s: string | null | undefined): string {
   return new Date(d).toISOString().slice(0, 10);
 }
 
+function isLivePositionAdvisor(p: AnyRec): boolean {
+  const st = String(p.status ?? "").toLowerCase();
+  if (["resolved", "gone", "sold", "closed", "empty"].includes(st)) return false;
+  const sy = Number(p.shares_yes ?? 0);
+  const sn = Number(p.shares_no ?? 0);
+  if (sy < 0.01 && sn < 0.01) return false;
+  return st === "active" || st === "open" || !st;
+}
+
 async function countOpenPositions(port: number): Promise<number> {
   const data = await getJson(`http://127.0.0.1:${port}/api/simmer/positions`);
   const raw = data.positions ?? data;
   const list: AnyRec[] = Array.isArray(raw) ? raw : [];
-  return list.filter((p) => String(p.status || "").toLowerCase() === "active").length;
+  return list.filter(isLivePositionAdvisor).length;
 }
 
 export async function buildAdvisorReport(port: number, projectRoot: string, trigger: string): Promise<{ report: AnyRec; text: string }> {
@@ -181,7 +190,17 @@ function formatResolutionCountdown(pos: AnyRec): string {
   }
 }
 
-/** Open Simmer positions for Telegram /positions (and typo /posittions). */
+/** Mirrors frontend/src/lib/positions.ts — checks both status AND material shares. */
+function isLivePosition(p: AnyRec): boolean {
+  const st = String(p.status ?? "").toLowerCase();
+  if (["resolved", "gone", "sold", "closed", "empty"].includes(st)) return false;
+  const sy = Number(p.shares_yes ?? 0);
+  const sn = Number(p.shares_no ?? 0);
+  if (sy < 0.01 && sn < 0.01) return false;
+  return st === "active" || st === "open" || !st;
+}
+
+/** Open Simmer positions fetched directly from Simmer API (not cached local data). */
 export async function buildOpenPositionsTelegramText(port: number): Promise<string> {
   const url = `http://127.0.0.1:${port}/api/simmer/positions`;
   let r: Response;
@@ -198,7 +217,7 @@ export async function buildOpenPositionsTelegramText(port: number): Promise<stri
   const data = (await r.json().catch(() => ({}))) as AnyRec;
   const raw = data.positions ?? data;
   const list: AnyRec[] = Array.isArray(raw) ? raw : [];
-  const open = list.filter((p) => String(p.status || "").toLowerCase() === "active");
+  const open = list.filter(isLivePosition);
 
   if (open.length === 0) {
     return "Open positions\nNone (active).";

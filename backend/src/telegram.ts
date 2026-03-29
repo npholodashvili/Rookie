@@ -108,20 +108,30 @@ export function acquireTelegramPollLock(projectRoot: string): (() => void) | nul
   return null;
 }
 
-export async function sendTelegramMessage(token: string, chatId: string, text: string): Promise<void> {
+export async function sendTelegramMessage(
+  token: string,
+  chatId: string,
+  text: string,
+  replyMarkup?: object
+): Promise<void> {
   if (!token || !chatId || !text) return;
   const url = `https://api.telegram.org/bot${token}/sendMessage`;
   // Telegram hard cap is 4096 chars; keep safe margin.
   const chunks = chunkText(text, 3800);
-  for (const chunk of chunks) {
+  for (let i = 0; i < chunks.length; i++) {
+    const body: Record<string, unknown> = {
+      chat_id: chatId,
+      text: chunks[i],
+      disable_web_page_preview: true,
+    };
+    // Only attach reply_markup on the last chunk
+    if (replyMarkup && i === chunks.length - 1) {
+      body.reply_markup = replyMarkup;
+    }
     await fetch(url, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        chat_id: chatId,
-        text: chunk,
-        disable_web_page_preview: true,
-      }),
+      body: JSON.stringify(body),
       signal: AbortSignal.timeout(10000),
     });
   }
@@ -131,7 +141,7 @@ export async function fetchTelegramUpdates(token: string, offset?: number): Prom
   if (!token) return { updates: [] };
   const q = new URLSearchParams();
   q.set("timeout", "1");
-  q.set("allowed_updates", JSON.stringify(["message"]));
+  q.set("allowed_updates", JSON.stringify(["message", "callback_query"]));
   if (typeof offset === "number") q.set("offset", String(offset));
   const url = `https://api.telegram.org/bot${token}/getUpdates?${q.toString()}`;
   const r = await fetch(url, { signal: AbortSignal.timeout(12000) });

@@ -6,6 +6,20 @@ let lastReason: string | null = null;
 let lastDecision: Record<string, unknown> | null = null;
 let lastSimmerCallAt: string | null = null;
 
+let enginePaused = false;
+let enginePausedAt: string | null = null;
+let enginePauseReason: string | null = null;
+
+export function setPaused(value: boolean, reason?: string) {
+  enginePaused = value;
+  enginePausedAt = value ? new Date().toISOString() : null;
+  enginePauseReason = value ? (reason ?? "manual") : null;
+}
+
+export function getPaused() {
+  return { paused: enginePaused, paused_at: enginePausedAt, reason: enginePauseReason };
+}
+
 export function setLastCycle(action: string, reason?: string, decision?: Record<string, unknown>) {
   lastCycleAt = new Date().toISOString();
   lastAction = action;
@@ -35,5 +49,6 @@ export function getStatus() {
     last_decision: lastDecision,
     last_simmer_call_at: lastSimmerCallAt,
     next_cycle_at: getNextCycleAt(),
+    ...getPaused(),
   };
 }

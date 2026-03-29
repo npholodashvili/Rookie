@@ -42,6 +42,7 @@ def _default_game_state() -> dict:
         "market_reentry_cooldowns": {},
         "market_theme_hints": {},
         "loss_streak_entry_pause_until": None,
+        "position_peak_pnl": {},
     }
 
 

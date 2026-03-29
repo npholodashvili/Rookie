@@ -1,4 +1,6 @@
+import { useEffect, useState } from "react";
 import { useHealth } from "../hooks/useHealth";
+import { useWebSocket } from "../hooks/useWebSocket";
 
 const statusColors: Record<string, string> = {
   green: "var(--green)",
@@ -9,6 +11,16 @@ const statusColors: Record<string, string> = {
 
 export function StatusBar() {
   const { health, phase, refresh } = useHealth(30000);
+  const [paused, setPaused] = useState(false);
+
+  useEffect(() => {
+    fetch("/api/engine/paused").then(r => r.json()).then(d => setPaused(!!d.paused)).catch(() => {});
+  }, []);
+
+  useWebSocket((raw: unknown) => {
+    const data = raw as { type?: string; payload?: { paused?: boolean } };
+    if (data?.type === "paused") setPaused(!!data.payload?.paused);
+  });
 
   return (
     <div
@@ -33,6 +45,20 @@ export function StatusBar() {
       )}
       {phase === "ok" && health ? (
         <>
+          {paused && (
+            <span style={{
+              background: "rgba(220,160,40,0.15)",
+              color: "#e5a040",
+              border: "1px solid rgba(220,160,40,0.4)",
+              borderRadius: 4,
+              fontSize: "0.72rem",
+              padding: "0.1rem 0.45rem",
+              fontWeight: 700,
+              letterSpacing: "0.02em",
+            }}>
+              ⏸ PAUSED
+            </span>
+          )}
           {(["backend", "simmer", "openclaw", "engine"] as const).map((key) => {
             const s = health[key];
             if (!s) return null;

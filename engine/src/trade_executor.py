@@ -908,6 +908,10 @@ def run_trading_cycle() -> dict:
         div = opp.get("divergence") or 0
         side = "yes" if div > 0 else "no"
         cand_theme = _infer_market_type(str(opp.get("question") or opp.get("title") or opp.get("name") or ""))
+        excluded_types = list(config.get("excluded_market_types") or [])
+        if excluded_types and cand_theme in excluded_types:
+            skip_reasons["excluded-type"] = skip_reasons.get("excluded-type", 0) + 1
+            continue
         max_pt = int(config.get("max_positions_per_market_type", 0))
         if max_pt > 0 and theme_by_type.get(cand_theme, 0) >= max_pt:
             skip_reasons["theme-cap"] = skip_reasons.get("theme-cap", 0) + 1
@@ -1168,6 +1172,14 @@ def run_position_monitor() -> dict:
     max_hold_hours = float(config.get("max_hold_hours", 24) or 0)
     venue = config.get("venue", "sim")
 
+    use_trailing = bool(config.get("use_trailing_stop", True))
+    trailing_trigger = float(config.get("trailing_stop_trigger_pct", 0.50))
+    trailing_dist = float(config.get("trailing_stop_distance_pct", 0.10))
+
+    _peak_state = load_game_state()
+    peak_pnl_map = dict(_peak_state.get("position_peak_pnl") or {})
+    peaks_dirty = False
+
     positions = get_positions(api_key)
     history = load_trade_history()
     closed = 0
@@ -1182,95 +1194,125 @@ def run_position_monitor() -> dict:
         market_id = pos.get("market_id")
         cost_basis = pos.get("cost_basis") or 0
         pnl = pos.get("pnl") or 0
-        if cost_basis <= 0:
-            continue
+        # pnl_pct is None when cost_basis is unknown — threshold checks are skipped but
+        # max-hold-time still runs so orphaned positions are never stuck open forever.
+        pnl_pct = (pnl / cost_basis) if cost_basis > 0 else None
 
-        pnl_pct = pnl / cost_basis
+        # Guard against double-scoring: if Simmer packs YES+NO into one position object
+        # both sides share the same pnl/cost_basis. Only count the game score once.
+        pnl_scored_this_pos = False
 
-        side = None
-        shares = 0
-        if (pos.get("shares_yes") or 0) > 0:
-            side = "yes"
-            shares = pos.get("shares_yes") or 0
-        elif (pos.get("shares_no") or 0) > 0:
-            side = "no"
-            shares = pos.get("shares_no") or 0
+        # Iterate both sides independently — Simmer may return a single position object
+        # with both shares_yes and shares_no set (e.g. if Rookie entered both sides).
+        # The old elif meant the NO side was silently ignored whenever YES was also present.
+        for side in ("yes", "no"):
+            shares = float(pos.get(f"shares_{side}") or 0)
+            if shares < 1:
+                continue
 
-        if not side or shares < 1:
-            continue
+            pos_key = f"{market_id}:{side}"
 
-        should_close = False
-        reason = ""
-        if pnl_pct <= -stop_loss_pct:
-            should_close = True
-            reason = f"stop-loss ({pnl_pct:.1%})"
-        elif take_profit_pct is not None and pnl_pct >= take_profit_pct:
-            should_close = True
-            reason = f"take-profit ({pnl_pct:.1%})"
+            should_close = False
+            reason = ""
 
-        if not should_close and pnl_pct < 0:
-            resolves_at = pos.get("resolves_at") or pos.get("end_date") or ""
-            if resolves_at:
-                try:
-                    res_dt = datetime.fromisoformat(str(resolves_at).replace("Z", "+00:00"))
-                    hours_left = (res_dt - datetime.now(timezone.utc)).total_seconds() / 3600
-                    pre_res_thresh = max(0.01, stop_loss_pct * 0.5)
-                    if 0 < hours_left < 2 and pnl_pct <= -pre_res_thresh:
-                        should_close = True
-                        reason = f"pre-resolution exit ({pnl_pct:.1%}, {hours_left:.1f}h left)"
-                except Exception:
-                    pass
+            if pnl_pct is not None:
+                # Update high watermark for trailing stop
+                stored_peak = float(peak_pnl_map.get(pos_key, pnl_pct))
+                current_peak = max(stored_peak, pnl_pct)
+                if current_peak != peak_pnl_map.get(pos_key):
+                    peak_pnl_map[pos_key] = current_peak
+                    peaks_dirty = True
 
-        if not should_close and max_hold_hours > 0:
-            opened_at = _infer_position_opened_at(pos, history)
-            if opened_at is not None:
-                if opened_at.tzinfo is None:
-                    opened_at = opened_at.replace(tzinfo=timezone.utc)
-                held_h = (datetime.now(timezone.utc) - opened_at).total_seconds() / 3600
-                if held_h >= max_hold_hours:
+                # 1. Hard stop-loss (always active, highest priority)
+                if pnl_pct <= -stop_loss_pct:
                     should_close = True
-                    reason = f"max-hold-time ({held_h:.1f}h >= {max_hold_hours}h)"
+                    reason = f"stop-loss ({pnl_pct:.1%})"
 
-        if should_close:
-            result = sell_position(api_key, market_id, side, shares, venue)
-            if result and result.get("success"):
-                closed += 1
-                append_trade({
-                    "trade_id": result.get("trade_id", ""),
-                    "market_id": market_id,
-                    "side": side,
-                    "action": "sell",
-                    "amount": 0,
-                    "shares": shares,
-                    "venue": venue,
-                    "created_at": datetime.now(timezone.utc).isoformat(),
-                    "source": "sdk:rookie",
-                    "reason": reason,
-                })
-                state = load_game_state()
-                if state.get("alive", True):
-                    dedup_key = f"{market_id}:{side}"
-                    already = set(state.get("processed_resolved_ids", []))
-                    if dedup_key not in already:
-                        process_trade_resolution(state, pnl, cost_basis, [])
-                        state = load_game_state()
-                        _update_daily_realized_and_pause(state, config, pnl)
-                    state = _mark_market_cooldown(state, market_id)
-                    already = set(state.get("processed_resolved_ids", []))
-                    already.add(dedup_key)
-                    state["processed_resolved_ids"] = list(already)[-500:]
-                    save_game_state(state)
-                st2 = load_game_state()
-                _prune_market_theme_hint(st2, market_id)
-                append_model_label({
-                    "market_id": market_id,
-                    "side": side,
-                    "pnl": pnl,
-                    "cost_basis": cost_basis,
-                    "return_pct": (pnl / cost_basis) if cost_basis else 0,
-                    "won": pnl > 0,
-                    "source": "monitor-close",
-                })
+                # 2. Trailing stop (active once peak >= trigger threshold)
+                elif use_trailing and current_peak >= trailing_trigger:
+                    trail_floor = current_peak - trailing_dist
+                    if pnl_pct <= trail_floor:
+                        should_close = True
+                        reason = f"trailing-stop ({pnl_pct:.1%}, peak {current_peak:.1%})"
+
+                # 3. Fixed take-profit (fallback when trailing stop is disabled)
+                elif not use_trailing and take_profit_pct is not None and pnl_pct >= take_profit_pct:
+                    should_close = True
+                    reason = f"take-profit ({pnl_pct:.1%})"
+
+                if not should_close and pnl_pct < 0:
+                    resolves_at = pos.get("resolves_at") or pos.get("end_date") or ""
+                    if resolves_at:
+                        try:
+                            res_dt = datetime.fromisoformat(str(resolves_at).replace("Z", "+00:00"))
+                            hours_left = (res_dt - datetime.now(timezone.utc)).total_seconds() / 3600
+                            pre_res_thresh = max(0.01, stop_loss_pct * 0.5)
+                            if 0 < hours_left < 2 and pnl_pct <= -pre_res_thresh:
+                                should_close = True
+                                reason = f"pre-resolution exit ({pnl_pct:.1%}, {hours_left:.1f}h left)"
+                        except Exception:
+                            pass
+
+            # Max-hold-time applies regardless of whether we have PnL data
+            if not should_close and max_hold_hours > 0:
+                opened_at = _infer_position_opened_at(pos, history)
+                if opened_at is not None:
+                    if opened_at.tzinfo is None:
+                        opened_at = opened_at.replace(tzinfo=timezone.utc)
+                    held_h = (datetime.now(timezone.utc) - opened_at).total_seconds() / 3600
+                    if held_h >= max_hold_hours:
+                        should_close = True
+                        reason = f"max-hold-time ({held_h:.1f}h >= {max_hold_hours}h)"
+
+            if should_close:
+                result = sell_position(api_key, market_id, side, shares, venue)
+                if result and result.get("success"):
+                    closed += 1
+                    append_trade({
+                        "trade_id": result.get("trade_id", ""),
+                        "market_id": market_id,
+                        "side": side,
+                        "action": "sell",
+                        "amount": 0,
+                        "shares": shares,
+                        "venue": venue,
+                        "created_at": datetime.now(timezone.utc).isoformat(),
+                        "source": "sdk:rookie",
+                        "reason": reason,
+                    })
+                    state = load_game_state()
+                    if state.get("alive", True):
+                        dedup_key = f"{market_id}:{side}"
+                        already = set(state.get("processed_resolved_ids", []))
+                        if dedup_key not in already and not pnl_scored_this_pos:
+                            process_trade_resolution(state, pnl, cost_basis, [])
+                            state = load_game_state()
+                            _update_daily_realized_and_pause(state, config, pnl)
+                            pnl_scored_this_pos = True
+                        state = _mark_market_cooldown(state, market_id)
+                        already = set(state.get("processed_resolved_ids", []))
+                        already.add(dedup_key)
+                        state["processed_resolved_ids"] = list(already)[-500:]
+                        save_game_state(state)
+                    st2 = load_game_state()
+                    _prune_market_theme_hint(st2, market_id)
+                    append_model_label({
+                        "market_id": market_id,
+                        "side": side,
+                        "pnl": pnl,
+                        "cost_basis": cost_basis,
+                        "return_pct": (pnl / cost_basis) if cost_basis else 0,
+                        "won": pnl > 0,
+                        "source": "monitor-close",
+                    })
+                    # Clean up peak tracking for closed position
+                    peak_pnl_map.pop(pos_key, None)
+                    peaks_dirty = True
+
+    if peaks_dirty:
+        st_final = load_game_state()
+        st_final["position_peak_pnl"] = peak_pnl_map
+        save_game_state(st_final)
 
     result = {"action": "closed" if closed else "none", "reason": "ok", "closed": closed}
     _attach_runtime_telemetry(
@@ -1303,38 +1345,62 @@ def run_resolution_check() -> int:
 
     for pos in resolved:
         market_id = pos.get("market_id")
-        side = "yes" if (pos.get("shares_yes") or 0) > 0 else ("no" if (pos.get("shares_no") or 0) > 0 else "unknown")
-        dedup_id = f"{market_id}:{side}"
-        if not market_id or dedup_id in processed:
+        if not market_id:
             continue
 
         cost_basis = pos.get("cost_basis") or 0
         pnl = pos.get("pnl") or 0
-        if cost_basis <= 0:
-            processed.add(dedup_id)
+
+        # Determine which sides need processing. If Simmer packs both YES and NO into
+        # one position object, collect both sides. The old elif missed the second side.
+        material_sides = [s for s in ("yes", "no") if float(pos.get(f"shares_{s}") or 0) >= 0.01]
+        if not material_sides:
+            # Zero-share resolved row — just mark both sides as deduped and skip.
+            for s in ("yes", "no"):
+                processed.add(f"{market_id}:{s}")
             continue
 
-        state = load_game_state()
-        if not state.get("alive", True):
-            break
+        pnl_counted = False  # Only count PnL/score once even if both sides are present.
+        for side in material_sides:
+            dedup_id = f"{market_id}:{side}"
+            if dedup_id in processed:
+                continue
 
-        process_trade_resolution(state, pnl, cost_basis, [])
-        state = load_game_state()
-        config = load_strategy_config()
-        _update_daily_realized_and_pause(state, config, pnl)
-        state = _mark_market_cooldown(state, market_id)
-        _prune_market_theme_hint(state, market_id)
-        append_model_label({
-            "market_id": market_id,
-            "side": side,
-            "pnl": pnl,
-            "cost_basis": cost_basis,
-            "return_pct": (pnl / cost_basis) if cost_basis else 0,
-            "won": pnl > 0,
-            "source": "resolved-position",
-        })
-        processed.add(dedup_id)
-        newly_processed += 1
+            if cost_basis <= 0:
+                processed.add(dedup_id)
+                continue
+
+            state = load_game_state()
+            if not state.get("alive", True):
+                break
+
+            if not pnl_counted:
+                process_trade_resolution(state, pnl, cost_basis, [])
+                state = load_game_state()
+                config = load_strategy_config()
+                _update_daily_realized_and_pause(state, config, pnl)
+                pnl_counted = True
+
+            state = _mark_market_cooldown(state, market_id)
+            _prune_market_theme_hint(state, market_id)
+            append_model_label({
+                "market_id": market_id,
+                "side": side,
+                "pnl": pnl,
+                "cost_basis": cost_basis,
+                "return_pct": (pnl / cost_basis) if cost_basis else 0,
+                "won": pnl > 0,
+                "source": "resolved-position",
+            })
+            # Clean up peak tracking for resolved position
+            st_peak = load_game_state()
+            pm = dict(st_peak.get("position_peak_pnl") or {})
+            pm.pop(dedup_id, None)
+            st_peak["position_peak_pnl"] = pm
+            save_game_state(st_peak)
+
+            processed.add(dedup_id)
+            newly_processed += 1
 
     if newly_processed > 0 or len(processed) != initial_processed:
         state = load_game_state()

@@ -868,6 +868,33 @@ export function Settings() {
       </div>
 
       <div className="card">
+        <h3 style={{ margin: "0 0 1rem 0" }}>Telegram Bot Commands</h3>
+        <p style={{ color: "var(--text-muted)", fontSize: "0.875rem", margin: "0 0 0.75rem 0" }}>
+          Send these commands to your Rookie bot. Use <code>/help</code> to get inline buttons in Telegram.
+        </p>
+        <table style={{ fontSize: "0.82rem", borderCollapse: "collapse", width: "100%" }}>
+          <tbody>
+            {([
+              ["/report",    "Full advisor report — PnL, learning stats, problems"],
+              ["/positions", "Open positions with P&L and time to resolution"],
+              ["/pnl",       "Quick PnL + balance snapshot"],
+              ["/status",    "Health check + paused/running state"],
+              ["/pause",     "Halt new trading cycles (monitor still protects open positions)"],
+              ["/resume",    "Restart trading cycles"],
+              ["/cycle",     "Trigger one trading cycle immediately"],
+              ["/align",     "Audit Simmer vs local state divergence"],
+              ["/help",      "Command list + inline keyboard buttons"],
+            ] as [string, string][]).map(([cmd, desc]) => (
+              <tr key={cmd}>
+                <td style={{ padding: "0.22rem 0.75rem 0.22rem 0", fontFamily: "monospace", whiteSpace: "nowrap", color: "var(--accent)" }}>{cmd}</td>
+                <td style={{ color: "var(--text-muted)", padding: "0.22rem 0" }}>{desc}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+
+      <div className="card">
         <h3 style={{ margin: "0 0 1rem 0" }}>Register New Agent (Simmer)</h3>
         <p style={{ color: "var(--text-muted)", fontSize: "0.875rem", margin: "0 0 0.5rem 0" }}>
           One-click registration. You will receive an API key (shown once) and a claim link.

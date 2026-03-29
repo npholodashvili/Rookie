@@ -1,66 +1,89 @@
 {
   "ok": true,
-  "generated_at": "2026-03-27T14:17:13.569072+00:00",
+  "generated_at": "2026-03-28T20:34:47.166700+00:00",
   "return_clip": 3.0,
   "label_sources_filter": null,
   "learning_window": {
-    "cutoff": "2026-03-21T15:00:00+00:00",
-    "dropped_before_cutoff": 95
+    "cutoff": "2026-03-14T00:00:00+00:00",
+    "dropped_before_cutoff": 0
   },
-  "paired_samples": 83,
+  "paired_samples": 191,
   "by_expected_edge_bin": [
     {
+      "bucket": "0.02-0.03",
+      "n": 2,
+      "win_rate": 1.0,
+      "avg_return_pct": 1.0074519095020824
+    },
+    {
+      "bucket": "0.03-0.04",
+      "n": 1,
+      "win_rate": 0.0,
+      "avg_return_pct": -1.0
+    },
+    {
+      "bucket": "0.04-0.06",
+      "n": 2,
+      "win_rate": 0.0,
+      "avg_return_pct": -0.398164387551558
+    },
+    {
       "bucket": "0.06-0.10",
-      "n": 13,
-      "win_rate": 0.6153846153846154,
-      "avg_return_pct": 0.25800318666101363
+      "n": 20,
+      "win_rate": 0.45,
+      "avg_return_pct": 0.048423316723018535
     },
     {
       "bucket": "0.10-1.00",
-      "n": 70,
-      "win_rate": 0.45714285714285713,
-      "avg_return_pct": 0.11909928702311168
+      "n": 166,
+      "win_rate": 0.4578313253012048,
+      "avg_return_pct": 0.10159602651007742
     }
   ],
   "by_abs_divergence_bin": [
     {
       "bucket": "0.06-0.10",
-      "n": 6,
-      "win_rate": 0.8333333333333334,
-      "avg_return_pct": 0.526815013363905
+      "n": 8,
+      "win_rate": 0.625,
+      "avg_return_pct": 0.2527959458498607
     },
     {
       "bucket": "0.10+",
-      "n": 77,
-      "win_rate": 0.45454545454545453,
-      "avg_return_pct": 0.11078053815620212
+      "n": 183,
+      "win_rate": 0.44808743169398907,
+      "avg_return_pct": 0.08759352028543925
     }
   ],
   "by_market_type": {
-    "sports": {
-      "n": 17,
-      "win_rate": 0.7058823529411765,
-      "avg_return_pct": 0.42090391814560313
+    "unknown": {
+      "n": 53,
+      "win_rate": 0.5660377358490566,
+      "avg_return_pct": 0.15703592476997402
     },
     "crypto": {
-      "n": 17,
-      "win_rate": 0.11764705882352941,
-      "avg_return_pct": -0.19680646376003802
-    },
-    "other": {
-      "n": 33,
-      "win_rate": 0.7272727272727273,
-      "avg_return_pct": 0.32367027981225077
+      "n": 18,
+      "win_rate": 0.16666666666666666,
+      "avg_return_pct": -0.1851345452068666
     },
     "weather": {
-      "n": 13,
-      "win_rate": 0.15384615384615385,
-      "avg_return_pct": -0.18501915597528634
+      "n": 19,
+      "win_rate": 0.21052631578947367,
+      "avg_return_pct": -0.15584517968182907
+    },
+    "other": {
+      "n": 70,
+      "win_rate": 0.4857142857142857,
+      "avg_return_pct": 0.12323221897035713
+    },
+    "sports": {
+      "n": 27,
+      "win_rate": 0.5925925925925926,
+      "avg_return_pct": 0.2941549108736664
     },
     "politics": {
-      "n": 3,
+      "n": 4,
       "win_rate": 0.0,
-      "avg_return_pct": -0.1315118041563891
+      "avg_return_pct": -0.1364699819024988
     }
   },
   "note": "Read-only. Use bins with n>=10 before changing min_expected_edge; wide CI on small n."

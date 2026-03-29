@@ -6,26 +6,33 @@ import { buildAdvisorReport, buildOpenPositionsTelegramText } from "./advisor.js
 import { addLog } from "./logs.js";
 import { acquireTelegramPollLock, fetchTelegramUpdates, sendTelegramMessage } from "./telegram.js";
 import { broadcast } from "./websocket.js";
+import { getPaused, setPaused } from "./engineStatus.js";
 
 let telegramChatIdRuntime = (process.env.TELEGRAM_CHAT_ID || "").trim();
 
 export function initScheduler(projectRoot: string) {
   const port = parseInt(process.env.PORT || "3001", 10);
 
-  // Position monitor every 1 minute (stop-loss / take-profit / max-hold per strategy_config)
+  // Position monitor every 1 minute — always runs even when paused (protects open positions)
   cron.schedule("* * * * *", () => {
     runMonitor(port);
   });
-  // Trading cycle every 15 minutes (find opportunities, execute trades)
+
+  // Trading cycle every 15 minutes — skipped when engine is paused
   cron.schedule("*/15 * * * *", () => {
+    if (getPaused().paused) {
+      addLog("info", "Scheduler: cycle skipped (engine paused)");
+      return;
+    }
     runCycle(port);
   });
-  // Fee + report every 2 hours (via API so logging/health matches other engine routes)
+
+  // Fee + report every 2 hours
   cron.schedule("0 */2 * * *", () => {
     runReport(projectRoot, port);
   });
 
-  // Daily advisory check (advice only, no strategy mutation)
+  // Daily advisory check
   const advisorCron = process.env.ADVISOR_DAILY_CRON || "0 9 * * *";
   cron.schedule(advisorCron, () => {
     runAdvisor(projectRoot, port, "daily-cron");
@@ -39,7 +46,7 @@ export function initScheduler(projectRoot: string) {
     });
   }
 
-  // One-time test advisory after 5 minutes from startup.
+  // One-time test advisory after 5 minutes from startup
   setTimeout(() => {
     runAdvisor(projectRoot, port, "startup+5m-test");
   }, 5 * 60 * 1000);
@@ -141,7 +148,7 @@ function startTelegramAdvisorBot(projectRoot: string, port: number) {
 
   const disablePoll = String(process.env.TELEGRAM_DISABLE_POLL || "").trim() === "1";
   if (disablePoll) {
-    addLog("info", "Telegram: TELEGRAM_DISABLE_POLL=1 — advisor command listener skipped (cron/advisor still runs)");
+    addLog("info", "Telegram: TELEGRAM_DISABLE_POLL=1 — advisor command listener skipped");
     return;
   }
 
@@ -149,13 +156,18 @@ function startTelegramAdvisorBot(projectRoot: string, port: number) {
   if (!releasePollLock) {
     addLog(
       "warn",
-      "Telegram: another Rookie backend holds data/.telegram_poll.lock — not starting getUpdates (prevents duplicate /report). Stop the other Node process or set TELEGRAM_DISABLE_POLL=1 on this one."
+      "Telegram: another Rookie backend holds the poll lock — not starting getUpdates. Set TELEGRAM_DISABLE_POLL=1 on this instance."
     );
     return;
   }
 
-  addLog("info", "Telegram: advisor command listener started (exclusive poll lock acquired)");
-  void maybeSendTelegram("Rookie advisor bot connected. Commands: /report, /positions, /status, /help");
+  addLog("info", "Telegram: advisor command listener started");
+  void sendTelegramMessage(
+    token,
+    telegramChatIdRuntime || (process.env.TELEGRAM_CHAT_ID || "").trim(),
+    "🤖 Rookie online.\nCommands: /report /positions /status /pause /resume /cycle /align /pnl /help",
+    buildTelegramKeyboard()
+  );
 
   let offset: number | undefined;
   const poll = async () => {
@@ -171,12 +183,37 @@ function startTelegramAdvisorBot(projectRoot: string, port: number) {
           if (seenIds.has(uid)) continue;
           seenIds.add(uid);
         }
+        // Handle callback_query (inline button tap) — answer it and route as command
+        const cbq = u?.callback_query;
+        if (cbq) {
+          const cbChatId = String(cbq.message?.chat?.id ?? cbq.from?.id ?? "");
+          const cbChatType = String(cbq.message?.chat?.type || "private");
+          if (cbChatId && cbChatType === "private") {
+            // Dismiss the loading spinner on the button
+            await fetch(`https://api.telegram.org/bot${token}/answerCallbackQuery`, {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ callback_query_id: cbq.id }),
+              signal: AbortSignal.timeout(5000),
+            }).catch(() => {});
+            if (telegramChatIdRuntime !== cbChatId) {
+              telegramChatIdRuntime = cbChatId;
+              addLog("info", `Telegram: bound runtime chat_id=${telegramChatIdRuntime} (callback)`);
+            }
+            // Re-inject as a synthetic message update by setting msg-like vars
+            const cbText = String(cbq.data || "").trim().toLowerCase();
+            if (cbText.startsWith("/")) {
+              // Dispatch to command handler via a synthetic update
+              u.message = { chat: { id: cbChatId, type: "private" }, text: cbText };
+            }
+          }
+        }
+
         const msg = u?.message;
         if (!msg) continue;
         const incomingChatId = String(msg?.chat?.id ?? "");
         const chatType = String(msg?.chat?.type || "");
         if (!incomingChatId || chatType !== "private") continue;
-        // Auto-bind runtime chat id to latest valid private incoming command source.
         if (telegramChatIdRuntime !== incomingChatId) {
           telegramChatIdRuntime = incomingChatId;
           addLog("info", `Telegram: bound runtime chat_id=${telegramChatIdRuntime}`);
@@ -184,58 +221,180 @@ function startTelegramAdvisorBot(projectRoot: string, port: number) {
         const text = String(msg?.text || "").trim().toLowerCase();
         if (!text.startsWith("/")) continue;
 
+        // ── /report ──────────────────────────────────────────────
         if (text.startsWith("/report")) {
-          await sendTelegramMessage(token, telegramChatIdRuntime, "Running on-demand advisor report...");
+          await sendTelegramMessage(token, telegramChatIdRuntime, "Running advisor report…");
           try {
             const { text: reportText } = await buildAdvisorReport(port, projectRoot, "telegram:/report");
             await sendTelegramMessage(token, telegramChatIdRuntime, reportText);
-            addLog("success", "Telegram: /report served");
           } catch (e) {
-            await sendTelegramMessage(token, telegramChatIdRuntime, `Advisor report failed: ${String(e)}`);
+            await sendTelegramMessage(token, telegramChatIdRuntime, `Report failed: ${String(e)}`);
           }
-        } else if (text.startsWith("/status")) {
-          try {
-            const r = await fetch(`http://127.0.0.1:${port}/api/health`, { signal: AbortSignal.timeout(10000) });
-            if (!r.ok) {
-              await sendTelegramMessage(
-                token,
-                telegramChatIdRuntime,
-                `Rookie status: /api/health failed (HTTP ${r.status}). Another app on port ${port}, or backend routes not loaded — run .\\start.ps1 once and close duplicate backend windows.`
-              );
-              continue;
-            }
-            const health = (await r.json().catch(() => ({}))) as Record<string, any>;
-            const statusText =
-              `Rookie status\n` +
-              `backend=${health?.backend?.status || "?"}, simmer=${health?.simmer?.status || "?"}, engine=${health?.engine?.status || "?"}, openclaw=${health?.openclaw?.status || "?"}`;
-            await sendTelegramMessage(token, telegramChatIdRuntime, statusText);
-          } catch (e) {
-            await sendTelegramMessage(token, telegramChatIdRuntime, `Status check failed: ${String(e)}`);
-          }
-        } else if (text.startsWith("/positions") || text.startsWith("/posittions")) {
+
+        // ── /positions ───────────────────────────────────────────
+        } else if (text.startsWith("/position")) {
           try {
             const posText = await buildOpenPositionsTelegramText(port);
             await sendTelegramMessage(token, telegramChatIdRuntime, posText);
-            addLog("success", "Telegram: /positions served");
           } catch (e) {
             await sendTelegramMessage(token, telegramChatIdRuntime, `Positions failed: ${String(e)}`);
           }
+
+        // ── /status ──────────────────────────────────────────────
+        } else if (text.startsWith("/status")) {
+          try {
+            const [health, paused] = await Promise.all([
+              fetch(`http://127.0.0.1:${port}/api/health`, { signal: AbortSignal.timeout(8000) })
+                .then((r) => r.json())
+                .catch(() => ({})) as Promise<Record<string, any>>,
+              fetch(`http://127.0.0.1:${port}/api/engine/paused`, { signal: AbortSignal.timeout(5000) })
+                .then((r) => r.json())
+                .catch(() => ({ paused: false })) as Promise<{ paused: boolean; reason?: string }>,
+            ]);
+            const pauseStr = paused.paused ? `⏸ PAUSED (${paused.reason ?? "manual"})` : "▶ running";
+            const lines = [
+              `Rookie status · ${pauseStr}`,
+              `backend=${health?.backend?.status ?? "?"} simmer=${health?.simmer?.status ?? "?"} engine=${health?.engine?.status ?? "?"} openclaw=${health?.openclaw?.status ?? "?"}`,
+            ];
+            await sendTelegramMessage(token, telegramChatIdRuntime, lines.join("\n"));
+          } catch (e) {
+            await sendTelegramMessage(token, telegramChatIdRuntime, `Status failed: ${String(e)}`);
+          }
+
+        // ── /pause ───────────────────────────────────────────────
+        } else if (text.startsWith("/pause")) {
+          try {
+            await fetch(`http://127.0.0.1:${port}/api/engine/pause`, {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ reason: "Telegram /pause command" }),
+            });
+            await sendTelegramMessage(token, telegramChatIdRuntime, "⏸ Engine paused. New trading cycles are halted. Monitor still protects open positions.\nUse /resume to restart.");
+          } catch (e) {
+            await sendTelegramMessage(token, telegramChatIdRuntime, `Pause failed: ${String(e)}`);
+          }
+
+        // ── /resume ──────────────────────────────────────────────
+        } else if (text.startsWith("/resume")) {
+          try {
+            await fetch(`http://127.0.0.1:${port}/api/engine/resume`, { method: "POST" });
+            await sendTelegramMessage(token, telegramChatIdRuntime, "▶ Engine resumed. Trading cycles will run on next schedule.");
+          } catch (e) {
+            await sendTelegramMessage(token, telegramChatIdRuntime, `Resume failed: ${String(e)}`);
+          }
+
+        // ── /cycle ───────────────────────────────────────────────
+        } else if (text.startsWith("/cycle")) {
+          const isPaused = getPaused().paused;
+          if (isPaused) {
+            await sendTelegramMessage(token, telegramChatIdRuntime, "Engine is paused. Use /resume first, or this command won't trigger a trade.");
+          }
+          await sendTelegramMessage(token, telegramChatIdRuntime, "Running cycle now…");
+          try {
+            const r = await fetch(`http://127.0.0.1:${port}/api/engine/cycle`, {
+              method: "POST",
+              signal: AbortSignal.timeout(60000),
+            });
+            const result = (await r.json().catch(() => ({}))) as { action?: string; reason?: string };
+            await sendTelegramMessage(
+              token,
+              telegramChatIdRuntime,
+              `Cycle done: ${result.action ?? "none"} — ${result.reason ?? "ok"}`
+            );
+          } catch (e) {
+            await sendTelegramMessage(token, telegramChatIdRuntime, `Cycle failed: ${String(e)}`);
+          }
+
+        // ── /align ───────────────────────────────────────────────
+        } else if (text.startsWith("/align")) {
+          await sendTelegramMessage(token, telegramChatIdRuntime, "Running alignment audit…");
+          try {
+            const r = await fetch(`http://127.0.0.1:${port}/api/audit/alignment`, {
+              signal: AbortSignal.timeout(20000),
+            });
+            const data = (await r.json().catch(() => ({}))) as Record<string, any>;
+            const lines = [
+              `Alignment audit · ${data.aligned ? "✅ OK" : "⚠️ DIVERGED"}`,
+              `Simmer: ${data.simmer?.active_positions ?? "?"} open · ${data.simmer?.wins ?? 0}W/${data.simmer?.losses ?? 0}L · PnL ${(data.simmer?.pnl ?? 0) >= 0 ? "+" : ""}${Number(data.simmer?.pnl ?? 0).toFixed(2)}`,
+              `Local:  ${data.local?.buys ?? 0} buys · ${data.local?.wins ?? 0}W/${data.local?.losses ?? 0}L · ${data.local?.points ?? 0}pts`,
+            ];
+            if (data.divergences?.length) {
+              lines.push("Issues:");
+              for (const d of data.divergences) lines.push(`  · ${d}`);
+            }
+            await sendTelegramMessage(token, telegramChatIdRuntime, lines.join("\n"));
+          } catch (e) {
+            await sendTelegramMessage(token, telegramChatIdRuntime, `Align failed: ${String(e)}`);
+          }
+
+        // ── /pnl ─────────────────────────────────────────────────
+        } else if (text.startsWith("/pnl")) {
+          try {
+            const [me, portfolio, gs] = await Promise.all([
+              fetch(`http://127.0.0.1:${port}/api/simmer/agents/me`, { signal: AbortSignal.timeout(10000) })
+                .then((r) => r.json())
+                .catch(() => ({})) as Promise<Record<string, any>>,
+              fetch(`http://127.0.0.1:${port}/api/simmer/portfolio`, { signal: AbortSignal.timeout(10000) })
+                .then((r) => r.json())
+                .catch(() => ({})) as Promise<Record<string, any>>,
+              fetch(`http://127.0.0.1:${port}/api/game-state`, { signal: AbortSignal.timeout(5000) })
+                .then((r) => r.json())
+                .catch(() => ({})) as Promise<Record<string, any>>,
+            ]);
+            const portPnl = Number(portfolio?.sim_pnl ?? 0);
+            const agentPnl = Number(me?.sim_pnl ?? me?.total_pnl ?? 0);
+            const balance = Number(me?.balance ?? me?.sim_balance ?? 0);
+            const lines = [
+              `PnL snapshot`,
+              `Portfolio: ${portPnl >= 0 ? "+" : ""}${portPnl.toFixed(2)} $SIM`,
+              `Agent/me:  ${agentPnl >= 0 ? "+" : ""}${agentPnl.toFixed(2)} $SIM`,
+              `Balance:   ${balance.toFixed(2)} $SIM`,
+              `Game: ${gs?.points ?? 0}pts · ${gs?.wins ?? 0}W/${gs?.losses ?? 0}L`,
+            ];
+            await sendTelegramMessage(token, telegramChatIdRuntime, lines.join("\n"));
+          } catch (e) {
+            await sendTelegramMessage(token, telegramChatIdRuntime, `PnL failed: ${String(e)}`);
+          }
+
+        // ── /help ────────────────────────────────────────────────
         } else if (text.startsWith("/help")) {
           await sendTelegramMessage(
             token,
             telegramChatIdRuntime,
-            "Commands:\n/report - full advisor report\n/positions - open positions, PnL, time to resolution (/posittions typo ok)\n/status - quick health\n/help - this message"
+            [
+              "Rookie commands:",
+              "/report   — full advisor report",
+              "/positions — open positions + PnL + time left",
+              "/status   — health + paused state",
+              "/pnl      — quick PnL / balance snapshot",
+              "/pause    — halt new trading cycles",
+              "/resume   — restart trading cycles",
+              "/cycle    — trigger one cycle now",
+              "/align    — audit Simmer vs local state",
+              "/help     — this message + buttons",
+            ].join("\n"),
+            buildTelegramKeyboard()
           );
         }
       }
     } catch {
       // Keep polling.
     } finally {
-      // Short delay when there were updates (drain queue); longer when idle (avoid hammering API).
       setTimeout(poll, hadUpdates ? 250 : 4000);
     }
   };
   void poll();
+}
+
+function buildTelegramKeyboard(): object {
+  return {
+    inline_keyboard: [
+      [{ text: "📊 Report", callback_data: "/report" }, { text: "📍 Positions", callback_data: "/positions" }],
+      [{ text: "💰 PnL", callback_data: "/pnl" }, { text: "🩺 Status", callback_data: "/status" }],
+      [{ text: "⏸ Pause", callback_data: "/pause" }, { text: "▶ Resume", callback_data: "/resume" }],
+      [{ text: "🔄 Cycle", callback_data: "/cycle" }, { text: "🔍 Align", callback_data: "/align" }],
+    ],
+  };
 }
 
 async function maybeSendTelegram(text: string) {
