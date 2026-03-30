@@ -1,25 +1,25 @@
 {
   "ok": true,
-  "generated_at": "2026-03-27T14:17:13.569072+00:00",
+  "generated_at": "2026-03-30T01:45:00.625298+00:00",
   "return_clip": 3.0,
   "label_sources_filter": null,
   "learning_window": {
     "cutoff": "2026-03-21T15:00:00+00:00",
     "dropped_before_cutoff": 95
   },
-  "paired_samples": 83,
+  "paired_samples": 153,
   "by_expected_edge_bin": [
     {
       "bucket": "0.06-0.10",
-      "n": 13,
-      "win_rate": 0.6153846153846154,
-      "avg_return_pct": 0.25800318666101363
+      "n": 15,
+      "win_rate": 0.6,
+      "avg_return_pct": 0.24280494305089853
     },
     {
       "bucket": "0.10-1.00",
-      "n": 70,
-      "win_rate": 0.45714285714285713,
-      "avg_return_pct": 0.11909928702311168
+      "n": 138,
+      "win_rate": 0.391304347826087,
+      "avg_return_pct": 0.02129774144051831
     }
   ],
   "by_abs_divergence_bin": [
@@ -31,31 +31,31 @@
     },
     {
       "bucket": "0.10+",
-      "n": 77,
-      "win_rate": 0.45454545454545453,
-      "avg_return_pct": 0.11078053815620212
+      "n": 147,
+      "win_rate": 0.3945578231292517,
+      "avg_return_pct": 0.023267159077357647
     }
   ],
   "by_market_type": {
     "sports": {
-      "n": 17,
-      "win_rate": 0.7058823529411765,
-      "avg_return_pct": 0.42090391814560313
+      "n": 36,
+      "win_rate": 0.6666666666666666,
+      "avg_return_pct": 0.15981264384229346
     },
     "crypto": {
-      "n": 17,
-      "win_rate": 0.11764705882352941,
-      "avg_return_pct": -0.19680646376003802
+      "n": 34,
+      "win_rate": 0.20588235294117646,
+      "avg_return_pct": -0.16725674320740425
     },
     "other": {
-      "n": 33,
-      "win_rate": 0.7272727272727273,
-      "avg_return_pct": 0.32367027981225077
+      "n": 55,
+      "win_rate": 0.4909090909090909,
+      "avg_return_pct": 0.2198512730081209
     },
     "weather": {
-      "n": 13,
-      "win_rate": 0.15384615384615385,
-      "avg_return_pct": -0.18501915597528634
+      "n": 25,
+      "win_rate": 0.2,
+      "avg_return_pct": -0.20730592190773195
     },
     "politics": {
       "n": 3,
