@@ -5449,5 +5449,41 @@
     "created_at": "2026-04-24T04:17:18.305240+00:00",
     "source": "sdk:rookie",
     "reason": "trailing giveback leg (5.8% vs peak 55.8%, \u0394=50.0%)"
+  },
+  {
+    "trade_id": "e3a1ccc0-6c16-4de3-a107-b96ceca96688",
+    "market_id": "695f1e9c-97f3-470e-9c35-06a5735fece6",
+    "side": "yes",
+    "action": "buy",
+    "amount": 3.75,
+    "shares": 0,
+    "venue": "sim",
+    "created_at": "2026-04-24T04:31:03.814492+00:00",
+    "source": "sdk:rookie",
+    "trade_exec_key": "e3a1ccc0-6c16-4de3-a107-b96ceca96688::yes::2026-04-24T04:31:03.814492+00:00"
+  },
+  {
+    "trade_id": "521155c9-500b-425c-822e-5950f7194af0",
+    "market_id": "695f1e9c-97f3-470e-9c35-06a5735fece6",
+    "side": "no",
+    "action": "sell",
+    "amount": 0,
+    "shares": 2.4202819791977754,
+    "venue": "sim",
+    "created_at": "2026-04-24T04:31:21.471487+00:00",
+    "source": "sdk:rookie",
+    "reason": "stop-loss leg (-55.8%)"
+  },
+  {
+    "trade_id": "485c4838-31db-4c40-b8d9-240da907843a",
+    "market_id": "089bb038-b23d-4eff-8cd4-86ccdf215dc7",
+    "side": "yes",
+    "action": "buy",
+    "amount": 3.75,
+    "shares": 13.88887564341227,
+    "venue": "sim",
+    "created_at": "2026-04-24T04:45:43.111099+00:00",
+    "source": "sdk:rookie",
+    "trade_exec_key": "485c4838-31db-4c40-b8d9-240da907843a::yes::2026-04-24T04:45:43.111099+00:00"
   }
 ]
