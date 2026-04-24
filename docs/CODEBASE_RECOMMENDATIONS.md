@@ -50,9 +50,9 @@ Post-implementation pass: how to move toward an agent that **logically picks tra
 - Little automated test coverage on pure decision helpers (`_candidate_sort_key`, evaluator weighting, regime persist flag).
 - **Recommendation:** `pytest` with small fixtures for JSONL samples and strategy dicts; CI optional.
 
-### 8. Skills ↔ OpenClaw
+### 8. Skills (optional)
 
-- OpenClaw is used for **wake / messaging** ([`openclaw_client.py`](../engine/src/openclaw_client.py)), not for per-market reasoning in the hot path.
+- Skills are invoked from the backend engine route as optional Python subprocesses; the built-in Rookie cycle remains the default. Rookie does not embed OpenClaw or other in-repo AI hooks.
 - **Recommendation:** If you want LLM assistance, define a **strict schema** (market_id, side, max_size, confidence) and call only when `expected_edge` in a band where history is weak—never replace hard risk limits.
 
 ## Suggested priority order

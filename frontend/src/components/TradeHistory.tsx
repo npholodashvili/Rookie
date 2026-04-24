@@ -1,10 +1,11 @@
-import { useEffect, useState, useCallback } from "react";
+import { useEffect, useState, useCallback, useMemo } from "react";
 import { positionHasMaterialShares } from "../lib/positions";
 
 const API = "/api";
 
 interface AuditRow {
   market_id: string;
+  local_trade_key?: string;
   question: string;
   side: string;
   shares: number | null;
@@ -23,6 +24,8 @@ interface AuditRow {
   shares_no: number;
   resolves_at: string;
   simmer_trades_count: number;
+  /** From Simmer position or closest matching BUY trade, if API exposes fees */
+  fee_venue_sim?: number | null;
 }
 
 function pnlColor(v: number | null): string {
@@ -95,10 +98,55 @@ function isOpen(r: AuditRow): boolean {
   return r.outcome_local === "open" || st === "active" || st === "open";
 }
 
+const PAGE_SIZE = 25;
+
+function csvEscape(s: string): string {
+  if (/[",\n]/.test(s)) return `"${s.replace(/"/g, '""')}"`;
+  return s;
+}
+
+function auditToCsv(rows: AuditRow[]): string {
+  const headers = [
+    "market_id",
+    "question",
+    "side",
+    "investment",
+    "created_at",
+    "outcome_local",
+    "pnl_local",
+    "outcome_simmer",
+    "pnl_simmer",
+    "status_simmer",
+    "fee_venue_sim",
+  ];
+  const lines = [headers.join(",")];
+  for (const r of rows) {
+    lines.push(
+      [
+        csvEscape(r.market_id),
+        csvEscape(r.question || ""),
+        csvEscape(r.side),
+        r.investment,
+        csvEscape(r.created_at || ""),
+        csvEscape(r.outcome_local),
+        r.pnl_local ?? "",
+        csvEscape(r.outcome_simmer),
+        r.pnl_simmer ?? "",
+        csvEscape(r.status_simmer || ""),
+        r.fee_venue_sim ?? "",
+      ].join(",")
+    );
+  }
+  return lines.join("\n");
+}
+
 export function TradeHistory() {
   const [rows, setRows] = useState<AuditRow[]>([]);
   const [loading, setLoading] = useState(true);
   const [filter, setFilter] = useState<"all" | "mismatch" | "open" | "gone">("all");
+  const [search, setSearch] = useState("");
+  const [sortBy, setSortBy] = useState<"date" | "pnl" | "status">("date");
+  const [page, setPage] = useState(0);
   const [closing, setClosing] = useState<string | null>(null);
   const [, setTick] = useState(0);
 
@@ -116,7 +164,13 @@ export function TradeHistory() {
       .finally(() => setLoading(false));
   }, []);
 
-  useEffect(() => { fetchRows(); }, []);
+  useEffect(() => {
+    fetchRows();
+  }, []);
+
+  useEffect(() => {
+    setPage(0);
+  }, [filter, rows.length]);
 
   const handleClose = async (r: AuditRow) => {
     const name = (r.question || "").slice(0, 50) || r.market_id.slice(0, 12);
@@ -130,7 +184,7 @@ export function TradeHistory() {
     );
     if (!confirmed) return;
 
-    setClosing(r.market_id);
+    setClosing(r.local_trade_key ?? r.market_id);
     try {
       const resp = await fetch(`${API}/simmer/close-position`, {
         method: "POST",
@@ -157,11 +211,38 @@ export function TradeHistory() {
   };
 
   const filtered = rows.filter((r) => {
+    if (search.trim()) {
+      const q = search.toLowerCase();
+      const hay = `${r.question} ${r.market_id}`.toLowerCase();
+      if (!hay.includes(q)) return false;
+    }
     if (filter === "mismatch") return mismatch(r.outcome_local, r.outcome_simmer);
     if (filter === "open") return isOpen(r);
     if (filter === "gone") return r.outcome_local === "gone" || r.status_simmer === "gone" || r.status_simmer === "sold";
     return true;
   });
+  filtered.sort((a, b) => {
+    if (sortBy === "pnl") return (b.pnl_simmer ?? -999999) - (a.pnl_simmer ?? -999999);
+    if (sortBy === "status") return String(a.status_simmer).localeCompare(String(b.status_simmer));
+    return (new Date(b.created_at || 0).getTime()) - (new Date(a.created_at || 0).getTime());
+  });
+
+  const pageCount = Math.max(1, Math.ceil(filtered.length / PAGE_SIZE));
+  const pageSafe = Math.min(page, pageCount - 1);
+  const pageRows = useMemo(() => {
+    const start = pageSafe * PAGE_SIZE;
+    return filtered.slice(start, start + PAGE_SIZE);
+  }, [filtered, pageSafe]);
+
+  const downloadCsv = () => {
+    const blob = new Blob([auditToCsv(filtered)], { type: "text/csv;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `trade-audit-${new Date().toISOString().slice(0, 10)}.csv`;
+    a.click();
+    URL.revokeObjectURL(url);
+  };
 
   const thStyle: React.CSSProperties = {
     textAlign: "left",
@@ -186,10 +267,12 @@ export function TradeHistory() {
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: "1rem" }}>
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: "0.5rem" }}>
         <h2 style={{ margin: 0 }}>Trade History</h2>
-        <div style={{ display: "flex", gap: "0.5rem", alignItems: "center" }}>
-          <span style={{ fontSize: "0.8rem", color: "var(--text-muted)" }}>{filtered.length} / {rows.length} trades</span>
+        <div style={{ display: "flex", gap: "0.5rem", alignItems: "center", flexWrap: "wrap" }}>
+          <span style={{ fontSize: "0.8rem", color: "var(--text-muted)" }}>
+            {filtered.length} / {rows.length} trades
+          </span>
           <select
             value={filter}
             onChange={(e) => setFilter(e.target.value as typeof filter)}
@@ -200,8 +283,40 @@ export function TradeHistory() {
             <option value="mismatch">Mismatches only</option>
             <option value="gone">Gone / untracked</option>
           </select>
+          <input
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+            placeholder="Search market/question"
+            style={{ fontSize: "0.8rem" }}
+          />
+          <select value={sortBy} onChange={(e) => setSortBy(e.target.value as typeof sortBy)} style={{ fontSize: "0.8rem" }}>
+            <option value="date">Newest</option>
+            <option value="pnl">PnL</option>
+            <option value="status">Status</option>
+          </select>
+          <button type="button" onClick={downloadCsv} disabled={filtered.length === 0}>
+            Export CSV
+          </button>
           <button onClick={fetchRows}>Refresh</button>
         </div>
+      </div>
+
+      <div
+        className="card"
+        style={{ fontSize: "0.78rem", lineHeight: 1.45, color: "var(--text-muted)", marginTop: "-0.5rem" }}
+      >
+        <strong style={{ color: "var(--text)" }}>Why this differs from Simmer Observability</strong>
+        <ul style={{ margin: "0.35rem 0 0 1rem", padding: 0 }}>
+          <li>
+            One row per <strong>local buy</strong> in Rookie&apos;s <code style={{ fontSize: "0.7rem" }}>trade_history.json</code>, joined to Simmer positions/trades. Simmer&apos;s log lists every BUY/SELL (e.g. risk-monitor), so row counts won&apos;t match.
+          </li>
+          <li>
+            <strong>P&amp;L (Simmer)</strong> is portfolio-style; large swings are often mark-to-market on open positions, not a missing trade.
+          </li>
+          <li>
+            <strong>Fee (venue)</strong> shows only if Simmer returns a fee field on the position or the closest matching venue BUY; otherwise &quot;—&quot;. Game-layer −1 pt / 2h is on the Reports tab, not $SIM.
+          </li>
+        </ul>
       </div>
 
       {loading ? (
@@ -210,12 +325,46 @@ export function TradeHistory() {
         <div className="card" style={{ color: "var(--text-muted)" }}>No trades to display.</div>
       ) : (
         <div className="card" style={{ overflow: "auto", maxHeight: "calc(100vh - 180px)", padding: 0 }}>
-          <table style={{ width: "100%", borderCollapse: "collapse", minWidth: 1300 }}>
+          <div
+            style={{
+              display: "flex",
+              justifyContent: "space-between",
+              alignItems: "center",
+              padding: "0.5rem 0.75rem",
+              borderBottom: "1px solid var(--border)",
+              fontSize: "0.8rem",
+              gap: "0.5rem",
+              flexWrap: "wrap",
+            }}
+          >
+            <span style={{ color: "var(--text-muted)" }}>
+              Page {pageSafe + 1} of {pageCount} ({PAGE_SIZE} per page)
+            </span>
+            <div style={{ display: "flex", gap: "0.35rem" }}>
+              <button type="button" disabled={pageSafe <= 0} onClick={() => setPage((p) => Math.max(0, p - 1))}>
+                Prev
+              </button>
+              <button
+                type="button"
+                disabled={pageSafe >= pageCount - 1}
+                onClick={() => setPage((p) => Math.min(pageCount - 1, p + 1))}
+              >
+                Next
+              </button>
+            </div>
+          </div>
+          <table style={{ width: "100%", borderCollapse: "collapse", minWidth: 1380 }}>
             <thead>
               <tr>
                 <th style={thStyle}>Market</th>
                 <th style={thStyle}>Side</th>
                 <th style={thStyle}>Invested</th>
+                <th
+                  style={thStyle}
+                  title="If Simmer exposes fee on position or matching venue BUY"
+                >
+                  Fee (venue)
+                </th>
                 <th style={{ ...thStyle, borderLeft: "2px solid var(--border)" }}>Outcome (Local)</th>
                 <th style={thStyle}>PnL (Local)</th>
                 <th style={thStyle}>Return (Local)</th>
@@ -230,19 +379,25 @@ export function TradeHistory() {
               </tr>
             </thead>
             <tbody>
-              {filtered.map((r, i) => {
+              {pageRows.map((r) => {
                 const hasMismatch = mismatch(r.outcome_local, r.outcome_simmer);
                 const rowBg = hasMismatch ? "rgba(255,60,60,0.08)" : "transparent";
                 const open = isOpen(r);
-                const isClosing = closing === r.market_id;
+                const rowKey = r.local_trade_key ?? `${r.market_id}:${r.side}:${r.created_at ?? ""}`;
+                const isClosing = closing === (r.local_trade_key ?? r.market_id);
                 return (
-                  <tr key={i} style={{ background: rowBg }}>
+                  <tr key={rowKey} style={{ background: rowBg }}>
                     <td style={{ ...tdStyle, maxWidth: 220, overflow: "hidden", textOverflow: "ellipsis" }} title={r.question || r.market_id}>
                       {(r.question || "").slice(0, 40) || r.market_id.slice(0, 12)}
                       {(r.question || "").length > 40 ? "..." : ""}
                     </td>
                     <td style={tdStyle}>{r.side}</td>
                     <td style={tdStyle}>${r.investment.toFixed(2)}</td>
+                    <td style={{ ...tdStyle, fontSize: "0.7rem", color: "var(--text-muted)" }} title="Passthrough from Simmer API when present">
+                      {r.fee_venue_sim != null && Number.isFinite(Number(r.fee_venue_sim))
+                        ? Number(r.fee_venue_sim).toFixed(4)
+                        : "—"}
+                    </td>
 
                     <td style={{ ...tdStyle, borderLeft: "2px solid var(--border)", fontWeight: 600, color: outcomeColor(r.outcome_local) }}>
                       {outcomeIcon(r.outcome_local)}

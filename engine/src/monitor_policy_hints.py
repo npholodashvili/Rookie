@@ -34,13 +34,26 @@ def compute_monitor_policy_hints(config: dict) -> dict[str, Any]:
     label_map: dict[str, dict] = {}
     for lb in labels:
         key = f"{lb.get('market_id')}::{lb.get('side', 'unknown')}"
-        label_map[key] = lb
+        prev = label_map.get(key)
+        prev_ts = str((prev or {}).get("timestamp") or "")
+        cur_ts = str(lb.get("timestamp") or "")
+        if not prev or cur_ts >= prev_ts:
+            label_map[key] = lb
+        ex = lb.get("trade_exec_key")
+        if ex:
+            label_map[f"exec::{ex}"] = lb
 
     mon_ret: list[float] = []
     res_ret: list[float] = []
     for ft in features:
+        ex = ft.get("trade_exec_key")
+        if ex:
+            lb = label_map.get(f"exec::{ex}")
+        else:
+            lb = None
         key = f"{ft.get('market_id')}::{ft.get('side', 'unknown')}"
-        lb = label_map.get(key)
+        if not lb:
+            lb = label_map.get(key)
         if not lb:
             continue
         src = str(lb.get("source") or "")

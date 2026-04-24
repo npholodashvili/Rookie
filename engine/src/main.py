@@ -4,6 +4,7 @@ Invoked by backend for: run_trading_cycle, process_fee_and_report, get_state, et
 Run from Rookie/: python -m engine.src.main <command>
 """
 import json
+import os
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -18,9 +19,10 @@ load_dotenv(ROOT / ".env")
 load_dotenv(ROOT / "data" / ".env.local", override=True)
 
 from engine.src.calibration_report import build_calibration_report
-from engine.src.config import ENGINE_HEALTH_PATH
+from engine.src.config import DATA_DIR, ENGINE_HEALTH_PATH
 from engine.src.game_master import load_game_state
 from engine.src.offline_evaluator import evaluate_offline
+from engine.src.simmer_training_export import export_simmer_trade_labels
 from engine.src.trade_executor import (
     load_strategy_config,
     process_fee_and_report,
@@ -41,7 +43,7 @@ def main() -> None:
         print(
             json.dumps(
                 {
-                    "error": "Usage: python -m engine.src.main <cycle|monitor|report|state|evaluate|calibrate>",
+                    "error": "Usage: python -m engine.src.main <cycle|monitor|report|state|evaluate|calibrate|export-simmer-labels>",
                 }
             )
         )
@@ -67,6 +69,16 @@ def main() -> None:
             cfg = load_strategy_config()
             ev = cfg.get("evaluator_label_sources")
             ls = ev if isinstance(ev, list) else None
+
+            def _jsonl_path(key: str):
+                raw = cfg.get(key)
+                if raw is None or raw == "":
+                    return None
+                name = Path(str(raw).strip()).name
+                if not name or name in (".", ".."):
+                    return None
+                return DATA_DIR / name
+
             result = evaluate_offline(
                 return_clip=float(cfg.get("evaluator_return_clip", 3.0)),
                 label_sources=ls,
@@ -79,7 +91,18 @@ def main() -> None:
                 evaluator_segment_min_samples=int(cfg.get("evaluator_segment_min_samples", 18)),
                 segment_merge_score_slack=float(cfg.get("evaluator_segment_merge_score_slack", 0.04)),
                 learning_effective_after=(str(cfg.get("learning_effective_after") or "").strip() or None),
+                features_path=_jsonl_path("evaluator_features_jsonl"),
+                labels_path=_jsonl_path("evaluator_labels_jsonl"),
             )
+            print(json.dumps(result))
+        elif cmd == "export-simmer-labels":
+            api_key = os.environ.get("SIMMER_API_KEY")
+            if not api_key:
+                print(json.dumps({"error": "SIMMER_API_KEY not set"}))
+                sys.exit(1)
+            cfg = load_strategy_config()
+            venue = str(cfg.get("venue", "sim"))
+            result = export_simmer_trade_labels(api_key, venue=venue)
             print(json.dumps(result))
         elif cmd == "calibrate":
             cfg = load_strategy_config()

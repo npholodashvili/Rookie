@@ -33,7 +33,7 @@ export function StatusBar() {
       )}
       {phase === "ok" && health ? (
         <>
-          {(["backend", "simmer", "openclaw", "engine"] as const).map((key) => {
+          {(["backend", "simmer", "engine"] as const).map((key) => {
             const s = health[key];
             if (!s) return null;
             const color = statusColors[s.status] || "var(--grey)";

@@ -1,25 +1,19 @@
-# Restart Rookie backend and frontend
+# Stop listeners on dev ports, then full start with preflight
 $root = $PSScriptRoot
 
-Write-Host "Stopping existing processes..." -ForegroundColor Yellow
-
-$ports = @(3001, 5173)
-foreach ($port in $ports) {
+Write-Host "Stopping processes on ports 3001, 5173..." -ForegroundColor Yellow
+foreach ($port in @(3001, 5173)) {
     try {
-        $conn = Get-NetTCPConnection -LocalPort $port -ErrorAction SilentlyContinue
-        $conn | ForEach-Object { $_.OwningProcess } | Sort-Object -Unique | ForEach-Object {
-            Stop-Process -Id $_ -Force -ErrorAction SilentlyContinue
-            Write-Host "  Stopped process $_ on port $port" -ForegroundColor Gray
-        }
+        Get-NetTCPConnection -LocalPort $port -State Listen -ErrorAction SilentlyContinue |
+            ForEach-Object { $_.OwningProcess } | Sort-Object -Unique |
+            ForEach-Object {
+                if ($_ -gt 0) {
+                    Stop-Process -Id $_ -Force -ErrorAction SilentlyContinue
+                    Write-Host "  Stopped PID $_ (port $port)" -ForegroundColor Gray
+                }
+            }
     } catch { }
 }
 
 Start-Sleep -Seconds 2
-Write-Host "Starting Rookie backend and frontend..." -ForegroundColor Cyan
-
-Start-Process powershell -ArgumentList "-NoExit", "-Command", "cd '$root\backend'; npm run dev"
-Start-Sleep -Seconds 2
-Start-Process powershell -ArgumentList "-NoExit", "-Command", "cd '$root\frontend'; npm run dev"
-
-Write-Host "Backend: http://localhost:3001" -ForegroundColor Green
-Write-Host "Frontend: http://localhost:5173" -ForegroundColor Green
+& "$root\start-rookie.ps1" @args

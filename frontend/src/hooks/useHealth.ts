@@ -7,8 +7,7 @@ export type HealthStatus = "green" | "yellow" | "red" | "unconfigured";
 export interface HealthState {
   backend?: { status: HealthStatus; latency_ms?: number; last_check: string };
   simmer?: { status: HealthStatus; latency_ms?: number; last_check: string };
-  openclaw?: { status: HealthStatus; latency_ms?: number; last_check: string };
-  engine?: { status: HealthStatus; last_check: string };
+  engine?: { status: HealthStatus; latency_ms?: number; last_check: string };
 }
 
 export type HealthPhase = "loading" | "ok" | "offline";

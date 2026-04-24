@@ -11,10 +11,13 @@ const defaultStrategy = {
   min_liquidity_24h: 500,
   max_slippage_pct: 0.05,
   max_positions: 4,
-  max_hold_hours: 24,
+  max_hold_hours: 48,
   max_total_exposure_pct: 0.6,
   venue: "sim",
-  signal_sources: ["simmer", "openclaw"],
+  signal_sources: ["simmer"],
+  trailing_peak_return_enabled: false,
+  trailing_return_giveback_pp: 0.1,
+  min_profit_return_to_trail: 0.05,
   cooldown_minutes: 30,
   market_reentry_cooldown_minutes: 90,
   min_hours_to_resolution: 4,
@@ -54,12 +57,11 @@ const defaultStrategy = {
   preferred_resolution_hours_max: 96,
   ensemble_resolution_sweet_spot_bonus: 0.07,
   learning_effective_after: "",
+  evaluator_features_jsonl: "",
+  evaluator_labels_jsonl: "",
 };
 
 interface AppConfig {
-  openclaw_url: string;
-  openclaw_hooks_path: string;
-  openclaw_hooks_token: string;
   telegram_bot_token: string;
   telegram_chat_id: string;
 }
@@ -67,9 +69,6 @@ interface AppConfig {
 export function Settings() {
   const [strategy, setStrategy] = useState(defaultStrategy);
   const [config, setConfig] = useState<AppConfig>({
-    openclaw_url: "",
-    openclaw_hooks_path: "/hooks",
-    openclaw_hooks_token: "",
     telegram_bot_token: "",
     telegram_chat_id: "",
   });
@@ -83,6 +82,7 @@ export function Settings() {
   } | null>(null);
   const [saving, setSaving] = useState(false);
   const [loading, setLoading] = useState(true);
+  const [saveMessage, setSaveMessage] = useState<string | null>(null);
 
   useEffect(() => {
     Promise.all([
@@ -96,12 +96,15 @@ export function Settings() {
 
   const saveStrategy = async () => {
     setSaving(true);
+    setSaveMessage(null);
     try {
-      await fetch(`${API}/strategy`, {
+      const r = await fetch(`${API}/strategy`, {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(strategy),
       });
+      const j = await r.json().catch(() => ({}));
+      setSaveMessage(r.ok ? "Strategy saved." : `Strategy save failed: ${j.error || r.status}`);
     } finally {
       setSaving(false);
     }
@@ -130,12 +133,14 @@ export function Settings() {
   const saveApiKey = async () => {
     if (!apiKey.trim()) return;
     setSaving(true);
+    setSaveMessage(null);
     try {
-      await fetch(`${API}/config/api-key`, {
+      const r = await fetch(`${API}/config/api-key`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ api_key: apiKey.trim() }),
       });
+      setSaveMessage(r.ok ? "API key saved." : `API key save failed (${r.status})`);
     } finally {
       setSaving(false);
     }
@@ -143,12 +148,14 @@ export function Settings() {
 
   const saveConfig = async () => {
     setSaving(true);
+    setSaveMessage(null);
     try {
-      await fetch(`${API}/config`, {
+      const r = await fetch(`${API}/config`, {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(config),
       });
+      setSaveMessage(r.ok ? "Telegram settings saved." : `Telegram save failed (${r.status})`);
     } finally {
       setSaving(false);
     }
@@ -157,6 +164,7 @@ export function Settings() {
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: "1.5rem" }}>
       <h2 style={{ margin: 0 }}>Settings</h2>
+      {saveMessage && <div className="card" style={{ padding: "0.5rem 0.75rem", fontSize: "0.85rem" }}>{saveMessage}</div>}
 
       <div className="card">
         <h3 style={{ margin: "0 0 1rem 0" }}>Strategy Tweaks</h3>
@@ -200,6 +208,50 @@ export function Settings() {
                   setStrategy({
                     ...strategy,
                     take_profit_pct: e.target.value ? parseFloat(e.target.value) : null,
+                  })
+                }
+                style={{ display: "block", width: "100%", marginTop: "0.25rem" }}
+              />
+            </label>
+            <label style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
+              <input
+                type="checkbox"
+                checked={strategy.trailing_peak_return_enabled ?? false}
+                onChange={(e) =>
+                  setStrategy({ ...strategy, trailing_peak_return_enabled: e.target.checked })
+                }
+              />
+              Return trailing (peak giveback); disables fixed take-profit on Simmer venue monitor
+            </label>
+            <label>
+              Trailing giveback (return fraction, e.g. 0.10 = 10pp below peak)
+              <input
+                type="number"
+                step="0.01"
+                min="0"
+                max="1"
+                value={strategy.trailing_return_giveback_pp ?? 0.1}
+                onChange={(e) =>
+                  setStrategy({
+                    ...strategy,
+                    trailing_return_giveback_pp: parseFloat(e.target.value) || 0,
+                  })
+                }
+                style={{ display: "block", width: "100%", marginTop: "0.25rem" }}
+              />
+            </label>
+            <label>
+              Min return to arm trailing (fraction)
+              <input
+                type="number"
+                step="0.01"
+                min="0"
+                max="1"
+                value={strategy.min_profit_return_to_trail ?? 0.05}
+                onChange={(e) =>
+                  setStrategy({
+                    ...strategy,
+                    min_profit_return_to_trail: parseFloat(e.target.value) || 0,
                   })
                 }
                 style={{ display: "block", width: "100%", marginTop: "0.25rem" }}
@@ -287,7 +339,7 @@ export function Settings() {
                 min="0"
                 max="720"
                 step="1"
-                value={strategy.max_hold_hours ?? 24}
+                value={strategy.max_hold_hours ?? 48}
                 onChange={(e) =>
                   setStrategy({ ...strategy, max_hold_hours: parseFloat(e.target.value) || 0 })
                 }
@@ -542,6 +594,26 @@ export function Settings() {
               />
             </label>
             <label>
+              Evaluator features JSONL (basename under <code>data/</code>, empty = model_features.jsonl)
+              <input
+                type="text"
+                placeholder="model_features.jsonl"
+                value={strategy.evaluator_features_jsonl ?? ""}
+                onChange={(e) => setStrategy({ ...strategy, evaluator_features_jsonl: e.target.value.trim() })}
+                style={{ display: "block", width: "100%", marginTop: "0.25rem", fontFamily: "monospace" }}
+              />
+            </label>
+            <label>
+              Evaluator labels JSONL (empty = model_labels.jsonl; try model_labels_simmer.jsonl after export)
+              <input
+                type="text"
+                placeholder="model_labels.jsonl"
+                value={strategy.evaluator_labels_jsonl ?? ""}
+                onChange={(e) => setStrategy({ ...strategy, evaluator_labels_jsonl: e.target.value.trim() })}
+                style={{ display: "block", width: "100%", marginTop: "0.25rem", fontFamily: "monospace" }}
+              />
+            </label>
+            <label>
               Evaluator interval (minutes)
               <input
                 type="number"
@@ -775,51 +847,9 @@ export function Settings() {
       </div>
 
       <div className="card">
-        <h3 style={{ margin: "0 0 1rem 0" }}>OpenClaw</h3>
-        <p style={{ color: "var(--text-muted)", fontSize: "0.875rem", margin: "0 0 0.5rem 0" }}>
-          For 10th-trade wake and strategy adjustment when win/loss &lt; 70/30. Use <strong>http://</strong> (not ws://) — webhooks use HTTP. Remote PC: http://192.168.x.x:18789
-        </p>
-        <div style={{ display: "flex", flexDirection: "column", gap: "0.5rem", maxWidth: 500 }}>
-          <label>
-            URL
-            <input
-              type="url"
-              placeholder="http://192.168.1.21:18789"
-              value={config.openclaw_url}
-              onChange={(e) => setConfig({ ...config, openclaw_url: e.target.value })}
-              style={{ display: "block", width: "100%", marginTop: "0.25rem" }}
-            />
-          </label>
-          <label>
-            Hooks path (default /hooks — change if your OpenClaw uses a different path)
-            <input
-              type="text"
-              placeholder="/hooks"
-              value={config.openclaw_hooks_path}
-              onChange={(e) => setConfig({ ...config, openclaw_hooks_path: e.target.value })}
-              style={{ display: "block", width: "100%", marginTop: "0.25rem" }}
-            />
-          </label>
-          <label>
-            Hooks token
-            <input
-              type="password"
-              placeholder="Your OpenClaw webhook token"
-              value={config.openclaw_hooks_token}
-              onChange={(e) => setConfig({ ...config, openclaw_hooks_token: e.target.value })}
-              style={{ display: "block", width: "100%", marginTop: "0.25rem" }}
-            />
-          </label>
-          <button onClick={saveConfig} disabled={saving}>
-            Save OpenClaw
-          </button>
-        </div>
-      </div>
-
-      <div className="card">
         <h3 style={{ margin: "0 0 1rem 0" }}>Telegram</h3>
         <p style={{ color: "var(--text-muted)", fontSize: "0.875rem", margin: "0 0 0.5rem 0" }}>
-          Optional. For future report delivery. If missed, -1 point per game rule.
+          Optional. For advisor / report delivery.
         </p>
         <div style={{ display: "flex", flexDirection: "column", gap: "0.5rem", maxWidth: 500 }}>
           <label>

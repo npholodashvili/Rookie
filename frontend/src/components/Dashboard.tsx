@@ -56,6 +56,8 @@ interface LearningStats {
       confidence?: number;
       n?: number;
     };
+    train_baseline?: { score?: number; win_rate?: number; n?: number };
+    train_best_policy?: { score?: number; win_rate?: number; n?: number };
   };
   baseline_vs_adaptive?: {
     base_score?: number;
@@ -81,11 +83,9 @@ function formatCountdown(nextAt?: string): string {
 }
 
 interface GameState {
-  points?: number;
   wins?: number;
   losses?: number;
   trades_count?: number;
-  alive?: boolean;
 }
 
 interface AgentMe {
@@ -132,6 +132,18 @@ interface CalibrationReport {
   note?: string;
 }
 
+interface GovernancePayload {
+  ok?: boolean;
+  events?: Array<Record<string, unknown>>;
+  message?: string;
+}
+
+interface SkipReasonSummary {
+  lookback_hours?: number;
+  cycles_considered?: number;
+  top?: Array<{ reason: string; count: number }>;
+}
+
 function formatResolutionTimer(resolvesAt?: string, timeToResolution?: string): string {
   if (timeToResolution) return timeToResolution;
   if (!resolvesAt) return "—";
@@ -162,15 +174,20 @@ export function Dashboard() {
   const [learning, setLearning] = useState<LearningStats | null>(null);
   const [calibration, setCalibration] = useState<CalibrationReport | null>(null);
   const [calibrateRunning, setCalibrateRunning] = useState(false);
+  const [evaluateRunning, setEvaluateRunning] = useState(false);
+  const [governance, setGovernance] = useState<GovernancePayload | null>(null);
+  const [skipSummary, setSkipSummary] = useState<SkipReasonSummary | null>(null);
   const [countdown, setCountdown] = useState("");
   const [loading, setLoading] = useState(true);
   const [fetchError, setFetchError] = useState(false);
+  const [actionMessage, setActionMessage] = useState<string | null>(null);
+  const [cycleRunning, setCycleRunning] = useState(false);
 
   const fetchData = async () => {
     setLoading(true);
     setFetchError(false);
     try {
-      const [gs, am, pos, tr, status, pf, learn, cal] = await Promise.all([
+      const [gs, am, pos, tr, status, pf, learn, cal, gov, skip] = await Promise.all([
         fetch(`${API}/game-state`)
           .then(async (r) => (r.ok ? r.json() : null))
           .catch(() => null),
@@ -181,11 +198,15 @@ export function Dashboard() {
         fetch(`${API}/simmer/portfolio`).then((r) => r.json()).catch(() => null),
         fetch(`${API}/learning`).then((r) => r.json()).catch(() => null),
         fetch(`${API}/learning/calibration`).then(async (r) => (r.ok ? r.json() : null)).catch(() => null),
+        fetch(`${API}/learning/governance`).then((r) => r.json()).catch(() => null),
+        fetch(`${API}/learning/skip-reasons?lookback_hours=24&limit=600`).then((r) => r.json()).catch(() => null),
       ]);
       if (status) setEngineStatus(status);
       if (learn) setLearning(learn);
+      setGovernance(gov && typeof gov === "object" ? (gov as GovernancePayload) : null);
+      setSkipSummary(skip && typeof skip === "object" ? (skip as SkipReasonSummary) : null);
       setCalibration(cal && !cal.error ? cal : null);
-      if (gs && typeof (gs as GameState).points === "number") setGameState(gs as GameState);
+      if (gs && typeof gs === "object") setGameState(gs as GameState);
       else if (!gs) setFetchError(true);
       if (am) setAgent(am);
       if (pf) setPortfolio(pf);
@@ -206,10 +227,11 @@ export function Dashboard() {
     const data = (raw || {}) as { type?: string; payload?: { state?: GameState } };
     if (data.type === "state" && data.payload?.state) {
       setGameState(data.payload.state);
-      fetchData();
+      fetch(`${API}/engine/status`).then((r) => r.json()).then((j) => setEngineStatus(j)).catch(() => null);
+      fetch(`${API}/simmer/positions`).then((r) => r.json()).then((j) => setPositions(j?.positions || j || [])).catch(() => null);
     }
     if (data.type === "report" && data.payload) {
-      fetchData();
+      fetch(`${API}/reports`).catch(() => null);
     }
   });
 
@@ -235,11 +257,9 @@ export function Dashboard() {
   const simmerWins = agent?.win_count ?? 0;
   const simmerLosses = agent?.loss_count ?? 0;
   const simmerWinRate = agent?.win_rate ?? 0;
-  const points = gameState?.points ?? 0;
   const wins = gameState?.wins ?? 0;
   const losses = gameState?.losses ?? 0;
   const winRate = wins + losses > 0 ? ((wins / (wins + losses)) * 100).toFixed(1) : "—";
-  const agentDead = gameState != null && gameState.alive === false;
 
   const strat = engineStatus?.strategy || {};
 
@@ -344,6 +364,18 @@ export function Dashboard() {
             <div>Model eval: {learning?.last_model_eval_at ? new Date(learning.last_model_eval_at).toLocaleTimeString() : "—"}</div>
             <div>Model applied: {learning?.last_model_apply_at ? new Date(learning.last_model_apply_at).toLocaleTimeString() : "—"}</div>
             <div>Eval samples: {learning?.model_eval?.samples ?? 0}</div>
+            {learning?.model_eval?.train_baseline && (
+              <div style={{ color: "var(--text-muted)" }}>
+                Train baseline score: {Number(learning.model_eval.train_baseline.score ?? 0).toFixed(3)} · n=
+                {learning.model_eval.train_baseline.n ?? "—"}
+              </div>
+            )}
+            {learning?.model_eval?.train_best_policy && (
+              <div style={{ color: "var(--text-muted)" }}>
+                Train best policy score: {Number(learning.model_eval.train_best_policy.score ?? 0).toFixed(3)} · n=
+                {learning.model_eval.train_best_policy.n ?? "—"}
+              </div>
+            )}
             {learning?.baseline_vs_adaptive && (
               <div>
                 Eval delta: {Number(learning.baseline_vs_adaptive.delta_score ?? 0).toFixed(3)}
@@ -390,6 +422,60 @@ export function Dashboard() {
         </div>
         <div>
           <div style={{ color: "var(--text-muted)", fontSize: "0.75rem", marginBottom: "0.25rem" }}>
+            Top skip reasons (24h)
+          </div>
+          <div style={{ fontSize: "0.7rem", lineHeight: 1.35 }}>
+            {(skipSummary?.top || []).length === 0 ? (
+              <span style={{ color: "var(--text-muted)" }}>No skip data yet.</span>
+            ) : (
+              (skipSummary?.top || []).slice(0, 5).map((row) => (
+                <div key={row.reason}>
+                  {row.reason}: {row.count}
+                </div>
+              ))
+            )}
+            {skipSummary?.cycles_considered != null && (
+              <div style={{ color: "var(--text-muted)", marginTop: "0.2rem" }}>
+                cycles: {skipSummary.cycles_considered}
+              </div>
+            )}
+          </div>
+        </div>
+        <div>
+          <div style={{ color: "var(--text-muted)", fontSize: "0.75rem", marginBottom: "0.25rem" }}>
+            Config audit (auto-apply / saves)
+          </div>
+          <div style={{ fontSize: "0.68rem", lineHeight: 1.35, maxHeight: 140, overflow: "auto" }}>
+            {(governance?.events || []).length === 0 ? (
+              <span style={{ color: "var(--text-muted)" }}>{governance?.message || "No events yet."}</span>
+            ) : (
+              [...(governance?.events || [])]
+                .slice(-8)
+                .reverse()
+                .map((ev, i) => (
+                  <div
+                    key={i}
+                    style={{
+                      marginBottom: 6,
+                      paddingBottom: 6,
+                      borderBottom: "1px solid var(--border)",
+                    }}
+                  >
+                    <div>{String(ev.timestamp ?? "").slice(0, 19) || "—"}</div>
+                    <div style={{ color: "var(--text-muted)" }}>{String(ev.type ?? "event")}</div>
+                    {Array.isArray(ev.keys) && (ev.keys as string[]).length > 0 && (
+                      <div style={{ color: "var(--text-muted)", fontSize: "0.62rem" }}>
+                        keys: {(ev.keys as string[]).slice(0, 6).join(", ")}
+                        {(ev.keys as string[]).length > 6 ? "…" : ""}
+                      </div>
+                    )}
+                  </div>
+                ))
+            )}
+          </div>
+        </div>
+        <div>
+          <div style={{ color: "var(--text-muted)", fontSize: "0.75rem", marginBottom: "0.25rem" }}>
             Strategy
           </div>
           <div style={{ fontSize: "0.8rem", lineHeight: 1.5 }}>
@@ -397,7 +483,12 @@ export function Dashboard() {
             <div>Min edge: {(Number(strat.min_edge_divergence) * 100 || 3).toFixed(1)}%</div>
             <div>Max pos: ${strat.max_position_usd ?? 20}</div>
             <div>Stop-loss: {(Number(strat.stop_loss_pct) * 100 || 20).toFixed(0)}%</div>
-            <div>Take-profit: {(Number(strat.take_profit_pct) * 100 || 50).toFixed(0)}%</div>
+            <div>
+              Take-profit:{" "}
+              {strat.trailing_peak_return_enabled
+                ? "off (trailing)"
+                : `${(Number(strat.take_profit_pct) * 100 || 50).toFixed(0)}%`}
+            </div>
             <div>Cooldown: {strat.cooldown_minutes ?? 30} min</div>
             <div>Kelly: {strat.use_kelly_sizing ? "on" : "off"}</div>
           </div>
@@ -414,22 +505,33 @@ export function Dashboard() {
           <button onClick={fetchData}>Refresh</button>
           <button
             className="primary"
+            disabled={cycleRunning}
             onClick={async () => {
-              await fetch("/api/engine/cycle", { method: "POST" });
-              fetchData();
+              setCycleRunning(true);
+              setActionMessage(null);
+              try {
+                const r = await fetch("/api/engine/cycle", { method: "POST" });
+                const j = await r.json().catch(() => ({}));
+                setActionMessage(
+                  r.ok ? `Cycle ok (${j?.action || "none"})` : `Cycle failed (${j?.error || r.status})`
+                );
+                await fetchData();
+              } finally {
+                setCycleRunning(false);
+              }
             }}
           >
-            Run Cycle
+            {cycleRunning ? "Running..." : "Run Cycle"}
           </button>
         </div>
       </div>
+      {actionMessage && (
+        <div className="card" style={{ padding: "0.5rem 0.75rem", fontSize: "0.85rem" }}>
+          {actionMessage}
+        </div>
+      )}
 
       <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))", gap: "1rem" }}>
-        <div className="card">
-          <div style={{ color: "var(--text-muted)", fontSize: "0.875rem" }}>Points</div>
-          <div style={{ fontSize: "1.5rem", fontWeight: 600 }}>{points}</div>
-          {agentDead && <span style={{ color: "var(--red)" }}>Agent dead</span>}
-        </div>
         <div className="card">
           <div style={{ color: "var(--text-muted)", fontSize: "0.875rem" }}>Balance ($SIM)</div>
           <div style={{ fontSize: "1.5rem", fontWeight: 600 }}>{balance.toFixed(2)}</div>
@@ -439,7 +541,7 @@ export function Dashboard() {
           <div style={{ fontSize: "1.5rem", fontWeight: 600, color: totalPnl >= 0 ? "var(--green)" : "var(--red)" }}>
             {totalPnl >= 0 ? "+" : ""}{totalPnl.toFixed(2)}
           </div>
-          <div style={{ fontSize: "0.75rem", color: "var(--text-muted)" }}>Source: portfolio</div>
+          <div style={{ fontSize: "0.75rem", color: "var(--text-muted)" }}>Source: portfolio (incl. open-position marks)</div>
         </div>
         <div className="card">
           <div style={{ color: "var(--text-muted)", fontSize: "0.875rem" }}>Win / Loss (Simmer)</div>
@@ -456,6 +558,27 @@ export function Dashboard() {
             Rookie buys: {gameState?.trades_count ?? 0}
           </div>
         </div>
+      </div>
+
+      <div className="card" style={{ fontSize: "0.8rem", lineHeight: 1.45, color: "var(--text-muted)" }}>
+        <strong style={{ color: "var(--text)" }}>Reading these numbers</strong>
+        <ul style={{ margin: "0.35rem 0 0 1rem", padding: 0 }}>
+          <li>
+            <strong>P&amp;L (Simmer)</strong> uses the portfolio endpoint (balance vs start). It moves with <strong>unrealized</strong>{" "}
+            marks on open positions, so a sharp dip after a peak is often inventory/prices, not a missing trade.
+          </li>
+          <li>
+            <strong>Win / Loss (Simmer)</strong> comes from <code style={{ fontSize: "0.72rem" }}>agents/me</code>.{" "}
+            <strong>Rookie W/L</strong> is the local ledger in <code style={{ fontSize: "0.72rem" }}>game_state.json</code> (resolved / monitor closes); counts differ from Simmer.
+          </li>
+          <li>
+            If portfolio PnL and agent PnL diverge a lot, you may have multiple agents or manual trades on the account (see Telegram advisor &quot;PnL gap&quot; heuristic).
+          </li>
+          <li>
+            Offline <strong>evaluate</strong>/<strong>calibrate</strong> do not place trades. Only <strong>auto-apply</strong> edits{" "}
+            <code style={{ fontSize: "0.72rem" }}>strategy_config.json</code> — audit trail below.
+          </li>
+        </ul>
       </div>
 
       <div className="card">
@@ -480,23 +603,40 @@ export function Dashboard() {
       <div className="card">
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", flexWrap: "wrap", gap: "0.75rem" }}>
           <h3 style={{ margin: 0 }}>Calibration &amp; evaluator holdout</h3>
-          <button
-            type="button"
-            disabled={calibrateRunning}
-            onClick={async () => {
-              setCalibrateRunning(true);
-              try {
-                const r = await fetch(`${API}/learning/calibrate`, { method: "POST" });
-                const j = await r.json().catch(() => ({}));
-                if (j && !j.error) setCalibration(j);
-                await fetchData();
-              } finally {
-                setCalibrateRunning(false);
-              }
-            }}
-          >
-            {calibrateRunning ? "Running…" : "Regenerate calibration"}
-          </button>
+          <div style={{ display: "flex", gap: "0.35rem", flexWrap: "wrap" }}>
+            <button
+              type="button"
+              disabled={calibrateRunning}
+              onClick={async () => {
+                setCalibrateRunning(true);
+                try {
+                  const r = await fetch(`${API}/learning/calibrate`, { method: "POST" });
+                  const j = await r.json().catch(() => ({}));
+                  if (j && !j.error) setCalibration(j);
+                  await fetchData();
+                } finally {
+                  setCalibrateRunning(false);
+                }
+              }}
+            >
+              {calibrateRunning ? "Running…" : "Regenerate calibration"}
+            </button>
+            <button
+              type="button"
+              disabled={evaluateRunning}
+              onClick={async () => {
+                setEvaluateRunning(true);
+                try {
+                  await fetch(`${API}/learning/evaluate`, { method: "POST" });
+                  await fetchData();
+                } finally {
+                  setEvaluateRunning(false);
+                }
+              }}
+            >
+              {evaluateRunning ? "Evaluating…" : "Run offline evaluator"}
+            </button>
+          </div>
         </div>
         <p style={{ fontSize: "0.75rem", color: "var(--text-muted)", margin: "0.35rem 0 0.75rem 0" }}>
           Read-only bins (expected edge &amp; |divergence| vs outcomes). Holdout status mirrors{" "}
@@ -588,19 +728,36 @@ export function Dashboard() {
       </div>
 
       <div className="card">
-        <h3 style={{ margin: "0 0 0.5rem 0" }}>Recent Trades</h3>
+        <h3 style={{ margin: "0 0 0.25rem 0" }}>Recent venue trades (Simmer API)</h3>
+        <p style={{ fontSize: "0.75rem", color: "var(--text-muted)", margin: "0 0 0.5rem 0", lineHeight: 1.4 }}>
+          Raw Simmer feed (all skills / BUY+SELL). Fees show only if the API includes them on each row.
+        </p>
         {trades.length === 0 ? (
           <p style={{ color: "var(--text-muted)", margin: 0 }}>No trades yet</p>
         ) : (
           <ul style={{ margin: 0, paddingLeft: "1.25rem" }}>
-            {(trades as { market_id?: string; side?: string; cost?: number; created_at?: string }[])
+            {(trades as {
+              market_id?: string;
+              side?: string;
+              cost?: number;
+              fee?: number;
+              fee_amount?: number;
+              action?: string;
+              created_at?: string;
+            }[])
               .slice(-10)
               .reverse()
-              .map((t, i) => (
-                <li key={i}>
-                  {t.side} — ${(t.cost ?? 0).toFixed(2)} — {t.created_at ? new Date(t.created_at).toLocaleString() : ""}
-                </li>
-              ))}
+              .map((t, i) => {
+                const fee = t.fee ?? t.fee_amount;
+                return (
+                  <li key={i} style={{ fontSize: "0.85rem", marginBottom: 4 }}>
+                    {t.action ? `${String(t.action)} ` : ""}
+                    {t.side} — ${(t.cost ?? 0).toFixed(2)}
+                    {fee != null && Number.isFinite(Number(fee)) ? ` · fee ${Number(fee).toFixed(4)}` : ""} —{" "}
+                    {t.created_at ? new Date(t.created_at).toLocaleString() : ""}
+                  </li>
+                );
+              })}
           </ul>
         )}
       </div>

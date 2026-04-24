@@ -1,8 +1,192 @@
+/**
+ * Data / observability routes: reports, learning, trade-audit joins.
+ * Do not use these handlers to change trading decisions (order placement, filters, sizing, monitor logic).
+ */
 import type { Request, Response } from "express";
 import { spawn } from "child_process";
 import express from "express";
 import fs from "fs/promises";
 import path from "path";
+import { addLog } from "../logs.js";
+
+function parseTimeMs(v: unknown): number {
+  if (v == null || v === "") return NaN;
+  const n = Date.parse(String(v));
+  return Number.isFinite(n) ? n : NaN;
+}
+
+/** Passthrough if Simmer includes fee fields on trade/position objects. */
+function extractVenueFee(rec: Record<string, unknown>): number | null {
+  const f = rec.fee ?? rec.fee_amount ?? rec.fee_usd ?? rec.fees;
+  if (f == null || f === "") return null;
+  if (typeof f === "number" && Number.isFinite(f)) return f;
+  if (typeof f === "object" && f !== null && "amount" in f) {
+    const a = Number((f as { amount?: unknown }).amount);
+    return Number.isFinite(a) ? a : null;
+  }
+  const p = parseFloat(String(f));
+  return Number.isFinite(p) ? p : null;
+}
+
+function buyRowKey(buy: Record<string, unknown>): string {
+  const tid = String(buy.trade_id ?? "");
+  const mid = String(buy.market_id ?? "");
+  const side = String(buy.side ?? "");
+  const ca = String(buy.created_at ?? "");
+  return tid ? `id:${tid}` : `${mid}:${side}:${ca}`;
+}
+
+function legKey(mid: string, side: string): string {
+  return `${mid}:${side}`;
+}
+
+function pickLatestLabelOnOrAfterBuy(
+  labelsAsc: Record<string, unknown>[],
+  buyAtMs: number
+): Record<string, unknown> | null {
+  if (!labelsAsc.length || !Number.isFinite(buyAtMs)) return null;
+  let best: Record<string, unknown> | null = null;
+  let bestT = -1;
+  for (const lb of labelsAsc) {
+    const t = parseTimeMs(lb.timestamp);
+    if (!Number.isFinite(t) || t < buyAtMs) continue;
+    if (t > bestT) {
+      bestT = t;
+      best = lb;
+    }
+  }
+  return best;
+}
+
+function findClosestSimmerBuy(
+  simTrades: Array<Record<string, unknown>>,
+  side: string,
+  buyAtMs: number
+): Record<string, unknown> | null {
+  const sideL = side.toLowerCase();
+  let best: Record<string, unknown> | null = null;
+  let bestDiff = Infinity;
+  for (const t of simTrades) {
+    if (String(t.action ?? "").toLowerCase() !== "buy") continue;
+    if (String(t.side ?? "").toLowerCase() !== sideL) continue;
+    const ts = parseTimeMs(t.created_at ?? t.timestamp);
+    if (!Number.isFinite(ts)) continue;
+    const d = Math.abs(ts - buyAtMs);
+    if (d < bestDiff) {
+      bestDiff = d;
+      best = t;
+    }
+  }
+  return best;
+}
+
+type StrategyRule = { type: "number" | "boolean" | "string" | "array" | "nullableArray"; min?: number; max?: number };
+
+const STRATEGY_RULES: Record<string, StrategyRule> = {
+  stop_loss_pct: { type: "number", min: 0.01, max: 0.5 },
+  take_profit_pct: { type: "number", min: 0.01, max: 3.0 },
+  max_position_usd: { type: "number", min: 1, max: 200 },
+  min_edge_divergence: { type: "number", min: 0, max: 0.2 },
+  min_expected_edge_pct: { type: "number", min: 0, max: 0.2 },
+  min_liquidity_24h: { type: "number", min: 0, max: 1_000_000 },
+  max_slippage_pct: { type: "number", min: 0, max: 0.5 },
+  max_positions: { type: "number", min: 1, max: 50 },
+  max_hold_hours: { type: "number", min: 0, max: 1000 },
+  max_total_exposure_pct: { type: "number", min: 0.05, max: 1 },
+  venue: { type: "string" },
+  signal_sources: { type: "array" },
+  trailing_peak_return_enabled: { type: "boolean" },
+  trailing_return_giveback_pp: { type: "number", min: 0, max: 1 },
+  min_profit_return_to_trail: { type: "number", min: 0, max: 1 },
+  cooldown_minutes: { type: "number", min: 0, max: 1440 },
+  market_reentry_cooldown_minutes: { type: "number", min: 0, max: 1440 },
+  min_hours_to_resolution: { type: "number", min: 0, max: 1000 },
+  max_hours_to_resolution: { type: "number", min: 0, max: 2000 },
+  daily_loss_limit_usd: { type: "number", min: 1, max: 10_000 },
+  cooloff_minutes_after_daily_stop: { type: "number", min: 5, max: 2880 },
+  market_tags: { type: "array" },
+  use_kelly_sizing: { type: "boolean" },
+  kelly_cap: { type: "number", min: 0, max: 1 },
+  zero_fee_only: { type: "boolean" },
+  auto_regime: { type: "boolean" },
+  strategy_mode: { type: "string" },
+  fallback_trade_usd: { type: "number", min: 0.5, max: 50 },
+  auto_apply_evaluator: { type: "boolean" },
+  evaluator_interval_minutes: { type: "number", min: 5, max: 1440 },
+  evaluator_min_samples: { type: "number", min: 1, max: 10000 },
+  evaluator_min_policy_n: { type: "number", min: 1, max: 10000 },
+  evaluator_min_delta_score: { type: "number", min: 0, max: 2 },
+  evaluator_min_confidence: { type: "number", min: 0, max: 1 },
+  evaluator_return_clip: { type: "number", min: 0.5, max: 10 },
+  evaluator_label_sources: { type: "nullableArray" },
+  evaluator_monitor_close_weight: { type: "number", min: 0, max: 5 },
+  evaluator_time_split_validate: { type: "boolean" },
+  evaluator_time_split_train_fraction: { type: "number", min: 0.55, max: 0.9 },
+  evaluator_min_holdout_rows: { type: "number", min: 5, max: 5000 },
+  evaluator_holdout_min_delta: { type: "number", min: 0, max: 1 },
+  allow_relax_min_divergence: { type: "boolean" },
+  allow_zero_divergence_fallback_scan: { type: "boolean" },
+  allow_fallback_activity_trade: { type: "boolean" },
+  persist_auto_regime_to_disk: { type: "boolean" },
+  skill: { type: "string" },
+  max_positions_per_market_type: { type: "number", min: 0, max: 20 },
+  max_positions_per_theme_same_side: { type: "number", min: 0, max: 20 },
+  loss_streak_pause_threshold: { type: "number", min: 0, max: 20 },
+  loss_streak_pause_minutes: { type: "number", min: 5, max: 1440 },
+  preferred_resolution_hours_min: { type: "number", min: 0, max: 1000 },
+  preferred_resolution_hours_max: { type: "number", min: 0, max: 2000 },
+  ensemble_resolution_sweet_spot_bonus: { type: "number", min: 0, max: 1 },
+  learning_effective_after: { type: "string" },
+  evaluator_features_jsonl: { type: "string" },
+  evaluator_labels_jsonl: { type: "string" },
+};
+
+function validateStrategyPayload(payload: unknown): { ok: true; value: Record<string, unknown> } | { ok: false; errors: string[] } {
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+    return { ok: false, errors: ["strategy payload must be an object"] };
+  }
+  const obj = payload as Record<string, unknown>;
+  const errors: string[] = [];
+  const out: Record<string, unknown> = {};
+  for (const key of Object.keys(obj)) {
+    const rule = STRATEGY_RULES[key];
+    if (!rule) {
+      errors.push(`unknown key: ${key}`);
+      continue;
+    }
+    const value = obj[key];
+    if (rule.type === "boolean") {
+      if (typeof value !== "boolean") errors.push(`${key} must be boolean`);
+      else out[key] = value;
+      continue;
+    }
+    if (rule.type === "string") {
+      if (typeof value !== "string") errors.push(`${key} must be string`);
+      else out[key] = value;
+      continue;
+    }
+    if (rule.type === "array") {
+      if (!Array.isArray(value)) errors.push(`${key} must be array`);
+      else out[key] = value;
+      continue;
+    }
+    if (rule.type === "nullableArray") {
+      if (!(value === null || Array.isArray(value))) errors.push(`${key} must be null or array`);
+      else out[key] = value;
+      continue;
+    }
+    const n = Number(value);
+    if (!Number.isFinite(n)) {
+      errors.push(`${key} must be a finite number`);
+      continue;
+    }
+    if (rule.min != null && n < rule.min) errors.push(`${key} must be >= ${rule.min}`);
+    if (rule.max != null && n > rule.max) errors.push(`${key} must be <= ${rule.max}`);
+    out[key] = n;
+  }
+  if (errors.length > 0) return { ok: false, errors };
+  return { ok: true, value: out };
+}
 
 export function dataRoutes(dataDir: string) {
   const router = express.Router();
@@ -41,12 +225,24 @@ export function dataRoutes(dataDir: string) {
 
   router.put("/strategy", async (req: Request, res: Response) => {
     try {
-      await writeJson("strategy_config.json", req.body);
+      const validation = validateStrategyPayload(req.body);
+      if (!validation.ok) {
+        addLog("warn", "Rejected invalid strategy update", { errors: validation.errors });
+        const auditPath = path.join(dataDir, "config_audit.jsonl");
+        const line =
+          JSON.stringify({
+            timestamp: new Date().toISOString(),
+            type: "manual_strategy_put_rejected",
+            source: "api",
+            errors: validation.errors,
+          }) + "\n";
+        await fs.appendFile(auditPath, line, "utf-8");
+        return res.status(400).json({ error: "invalid strategy payload", details: validation.errors });
+      }
+      await writeJson("strategy_config.json", validation.value);
       const auditPath = path.join(dataDir, "config_audit.jsonl");
       const keys =
-        req.body && typeof req.body === "object" && !Array.isArray(req.body)
-          ? Object.keys(req.body as object)
-          : [];
+        validation.value && typeof validation.value === "object" ? Object.keys(validation.value as object) : [];
       const line =
         JSON.stringify({
           timestamp: new Date().toISOString(),
@@ -71,22 +267,9 @@ export function dataRoutes(dataDir: string) {
     }
   });
 
-  // Graveyard
-  router.get("/graveyard", async (_req: Request, res: Response) => {
-    try {
-      const data = await readJson("graveyard.json");
-      res.json(Array.isArray(data) ? data : []);
-    } catch {
-      res.json([]);
-    }
-  });
-
-  // App config (OpenClaw, Telegram)
+  // App config (Telegram, etc.)
   const configPath = path.join(dataDir, "app_config.json");
   const defaultConfig = {
-    openclaw_url: "",
-    openclaw_hooks_path: "/hooks",
-    openclaw_hooks_token: "",
     telegram_bot_token: "",
     telegram_chat_id: "",
   };
@@ -112,9 +295,6 @@ export function dataRoutes(dataDir: string) {
       const config = {
         ...defaultConfig,
         ...existing,
-        openclaw_url: String(body.openclaw_url ?? existing.openclaw_url ?? "").trim(),
-        openclaw_hooks_path: (String(body.openclaw_hooks_path ?? existing.openclaw_hooks_path ?? "/hooks").trim() || "/hooks").replace(/\/$/, ""),
-        openclaw_hooks_token: String(body.openclaw_hooks_token ?? existing.openclaw_hooks_token ?? "").trim(),
         telegram_bot_token: String(body.telegram_bot_token ?? existing.telegram_bot_token ?? "").trim(),
         telegram_chat_id: String(body.telegram_chat_id ?? existing.telegram_chat_id ?? "").trim(),
       };
@@ -128,9 +308,6 @@ export function dataRoutes(dataDir: string) {
         envContent = await fs.readFile(envPath, "utf-8");
       } catch {}
       const lines = envContent.split("\n").filter((l) => !l.startsWith("OPENCLAW_") && !l.startsWith("TELEGRAM_"));
-      if (config.openclaw_url) lines.push(`OPENCLAW_URL=${config.openclaw_url}`);
-      if (config.openclaw_hooks_path) lines.push(`OPENCLAW_HOOKS_PATH=${config.openclaw_hooks_path}`);
-      if (config.openclaw_hooks_token) lines.push(`OPENCLAW_HOOKS_TOKEN=${config.openclaw_hooks_token}`);
       if (config.telegram_bot_token) lines.push(`TELEGRAM_BOT_TOKEN=${config.telegram_bot_token}`);
       if (config.telegram_chat_id) lines.push(`TELEGRAM_CHAT_ID=${config.telegram_chat_id}`);
       await fs.writeFile(envPath, lines.filter(Boolean).join("\n") + "\n");
@@ -177,7 +354,8 @@ export function dataRoutes(dataDir: string) {
           .slice(0, 50)
           .map(async (f) => {
             const data = await fs.readFile(path.join(reportsDir, f), "utf-8");
-            return JSON.parse(data);
+            const parsed = JSON.parse(data) as Record<string, unknown>;
+            return { ...parsed, _report_filename: f };
           })
       );
       res.json(reports);
@@ -321,6 +499,42 @@ export function dataRoutes(dataDir: string) {
     }
   });
 
+  router.get("/learning/skip-reasons", async (req: Request, res: Response) => {
+    try {
+      const lookbackHours = Math.max(1, Math.min(168, Number(req.query.lookback_hours || 24)));
+      const cycleLimit = Math.max(20, Math.min(2000, Number(req.query.limit || 400)));
+      const journalPath = path.join(dataDir, "decision_journal.jsonl");
+      const text = await fs.readFile(journalPath, "utf-8");
+      const lines = text.split("\n").filter(Boolean).slice(-cycleLimit);
+      const cutoff = Date.now() - lookbackHours * 60 * 60 * 1000;
+      const totals: Record<string, number> = {};
+      let consideredCycles = 0;
+      for (const line of lines) {
+        let evt: Record<string, unknown> | null = null;
+        try {
+          evt = JSON.parse(line) as Record<string, unknown>;
+        } catch {
+          evt = null;
+        }
+        if (!evt || evt.type !== "cycle") continue;
+        const ts = Date.parse(String(evt.timestamp || ""));
+        if (!Number.isFinite(ts) || ts < cutoff) continue;
+        consideredCycles += 1;
+        const skips = (evt.decision as { skips?: Record<string, number> } | undefined)?.skips || {};
+        for (const [k, v] of Object.entries(skips)) {
+          totals[k] = (totals[k] || 0) + Number(v || 0);
+        }
+      }
+      const top = Object.entries(totals)
+        .sort((a, b) => b[1] - a[1])
+        .slice(0, 10)
+        .map(([reason, count]) => ({ reason, count }));
+      res.json({ lookback_hours: lookbackHours, cycles_considered: consideredCycles, top });
+    } catch {
+      res.json({ lookback_hours: 24, cycles_considered: 0, top: [] });
+    }
+  });
+
   router.post("/learning/calibrate", async (_req: Request, res: Response) => {
     const projectRoot = path.dirname(dataDir);
     const py = process.platform === "win32" ? "python" : "python3";
@@ -337,6 +551,26 @@ export function dataRoutes(dataDir: string) {
         res.status(code === 0 ? 200 : 500).json(JSON.parse(raw));
       } catch {
         res.status(500).json({ ok: false, error: errBuf || `calibrate exited ${code}` });
+      }
+    });
+  });
+
+  router.post("/learning/evaluate", async (_req: Request, res: Response) => {
+    const projectRoot = path.dirname(dataDir);
+    const py = process.platform === "win32" ? "python" : "python3";
+    const proc = spawn(py, ["-m", "engine.src.main", "evaluate"], {
+      cwd: projectRoot,
+      env: { ...process.env },
+    });
+    let errBuf = "";
+    proc.stderr?.on("data", (d) => (errBuf += d.toString()));
+    proc.on("close", async (code) => {
+      try {
+        const p = path.join(dataDir, "model_eval_latest.json");
+        const raw = await fs.readFile(p, "utf-8");
+        res.status(code === 0 ? 200 : 500).json(JSON.parse(raw));
+      } catch {
+        res.status(500).json({ ok: false, error: errBuf || `evaluate exited ${code}` });
       }
     });
   });
@@ -394,8 +628,11 @@ export function dataRoutes(dataDir: string) {
         } catch {}
       }
 
-      const keyOf = (row: Record<string, unknown>): string =>
-        `${String(row.market_id || "")}:${String(row.side || "unknown")}`;
+      const keyOf = (row: Record<string, unknown>): string => {
+        const ex = String(row.trade_exec_key || "");
+        if (ex) return `exec:${ex}`;
+        return `${String(row.market_id || "")}:${String(row.side || "unknown")}`;
+      };
 
       // Queue labels per key and attach each label to one prior feature (entry decision).
       const labelsByKey = new Map<string, Array<Record<string, unknown>>>();
@@ -519,28 +756,35 @@ export function dataRoutes(dataDir: string) {
     }
   });
 
-  // Trade audit: join local history + labels with Simmer positions/trades
+  // Trade audit: join local buys + labels + Simmer (observability only — does not affect execution)
   router.get("/trade-audit", async (_req: Request, res: Response) => {
     try {
       const apiKey = process.env.SIMMER_API_KEY;
       const localTrades: Array<Record<string, unknown>> = await readJson("trade_history.json").catch(() => []);
 
-      // Read model labels (local resolution data)
       const labelsPath = path.join(dataDir, "model_labels.jsonl");
-      const labelMap = new Map<string, Record<string, unknown>>();
+      const labelLists = new Map<string, Array<Record<string, unknown>>>();
       try {
         const text = await fs.readFile(labelsPath, "utf-8");
         for (const line of text.split("\n")) {
           if (!line.trim()) continue;
           try {
-            const lb = JSON.parse(line);
-            const key = `${lb.market_id}:${lb.side || "unknown"}`;
-            labelMap.set(key, lb);
+            const lb = JSON.parse(line) as Record<string, unknown>;
+            const ex = String(lb.trade_exec_key || "");
+            const key = ex ? `exec:${ex}` : legKey(String(lb.market_id ?? ""), String(lb.side || "unknown"));
+            if (!labelLists.has(key)) labelLists.set(key, []);
+            labelLists.get(key)!.push(lb);
           } catch {}
         }
       } catch {}
+      for (const arr of labelLists.values()) {
+        arr.sort((a, b) => {
+          const x = parseTimeMs(a.timestamp);
+          const y = parseTimeMs(b.timestamp);
+          return (Number.isFinite(x) ? x : 0) - (Number.isFinite(y) ? y : 0);
+        });
+      }
 
-      // Fetch Simmer positions + trades
       let simmerPositions: Array<Record<string, unknown>> = [];
       let simmerTrades: Array<Record<string, unknown>> = [];
       if (apiKey) {
@@ -561,7 +805,6 @@ export function dataRoutes(dataDir: string) {
         } catch {}
       }
 
-      // Index Simmer data by market_id
       const simmerPosMap = new Map<string, Record<string, unknown>>();
       for (const p of simmerPositions) {
         const mid = String(p.market_id || "");
@@ -575,26 +818,63 @@ export function dataRoutes(dataDir: string) {
         simmerTradeMap.get(mid)!.push(t);
       }
 
-      // Build local buy entries only (skip sell records for row grouping)
-      const buys = (Array.isArray(localTrades) ? localTrades : []).filter(
-        (t) => t.action !== "sell"
-      );
-      // Find matching sell for each buy
-      const sells = (Array.isArray(localTrades) ? localTrades : []).filter(
-        (t) => t.action === "sell"
-      );
-      const sellMap = new Map<string, Record<string, unknown>>();
+      const buys = (Array.isArray(localTrades) ? localTrades : []).filter((t) => t.action !== "sell");
+      const sells = (Array.isArray(localTrades) ? localTrades : []).filter((t) => t.action === "sell");
+
+      const sellsByLeg = new Map<string, Record<string, unknown>[]>();
       for (const s of sells) {
-        const key = `${s.market_id}:${s.side || "unknown"}`;
-        sellMap.set(key, s);
+        const k = legKey(String(s.market_id || ""), String(s.side || "unknown"));
+        if (!sellsByLeg.has(k)) sellsByLeg.set(k, []);
+        sellsByLeg.get(k)!.push(s as Record<string, unknown>);
+      }
+      for (const arr of sellsByLeg.values()) {
+        arr.sort((a, b) => {
+          const x = parseTimeMs(a.created_at);
+          const y = parseTimeMs(b.created_at);
+          return (Number.isFinite(x) ? x : 0) - (Number.isFinite(y) ? y : 0);
+        });
+      }
+
+      const buysByLeg = new Map<string, Record<string, unknown>[]>();
+      for (const b of buys) {
+        const k = legKey(String(b.market_id || ""), String(b.side || "unknown"));
+        if (!buysByLeg.has(k)) buysByLeg.set(k, []);
+        buysByLeg.get(k)!.push(b as Record<string, unknown>);
+      }
+
+      const sellMatchByBuyKey = new Map<string, Record<string, unknown> | null>();
+      for (const [leg, groupBuys] of buysByLeg) {
+        const sellsAsc = sellsByLeg.get(leg) || [];
+        let j = 0;
+        const sortedBuys = [...groupBuys].sort((a, b) => {
+          const x = parseTimeMs(a.created_at);
+          const y = parseTimeMs(b.created_at);
+          return (Number.isFinite(x) ? x : 0) - (Number.isFinite(y) ? y : 0);
+        });
+        for (const buy of sortedBuys) {
+          const tBuy = parseTimeMs(buy.created_at);
+          while (j < sellsAsc.length && parseTimeMs(sellsAsc[j].created_at) < tBuy) j++;
+          const bk = buyRowKey(buy);
+          if (j < sellsAsc.length) {
+            sellMatchByBuyKey.set(bk, sellsAsc[j]);
+            j++;
+          } else {
+            sellMatchByBuyKey.set(bk, null);
+          }
+        }
       }
 
       const rows = buys.map((buy) => {
         const mid = String(buy.market_id || "");
         const side = String(buy.side || "unknown");
-        const key = `${mid}:${side}`;
-        const localSell = sellMap.get(key) || null;
-        const label = labelMap.get(key) || null;
+        const lk = legKey(mid, side);
+        const bk = buyRowKey(buy);
+        const buyAtMs = parseTimeMs(buy.created_at);
+        const localSell = sellMatchByBuyKey.get(bk) ?? null;
+        const labelsAsc = labelLists.get(lk) || [];
+        const execLabelKey = buy.trade_exec_key ? `exec:${String(buy.trade_exec_key)}` : "";
+        const execLabels = execLabelKey ? labelLists.get(execLabelKey) || [] : [];
+        const label = execLabels[execLabels.length - 1] || pickLatestLabelOnOrAfterBuy(labelsAsc, buyAtMs);
         const simPos = simmerPosMap.get(mid) || null;
         const simTrades = simmerTradeMap.get(mid) || [];
 
@@ -602,14 +882,12 @@ export function dataRoutes(dataDir: string) {
         const sharesNo = simPos ? Number((simPos as Record<string, unknown>).shares_no ?? 0) : 0;
         const materialSimShares = sharesYes >= 0.01 || sharesNo >= 0.01;
 
-        // Simmer outcome from position
         let simStatus = simPos ? String((simPos as Record<string, unknown>).status || "") : "";
         let simPnl: number | null = simPos ? Number((simPos as Record<string, unknown>).pnl ?? 0) : null;
         let simOutcome = simPos ? String((simPos as Record<string, unknown>).outcome || "") : "";
         let simCostBasis: number | null = simPos ? Number((simPos as Record<string, unknown>).cost_basis ?? 0) : null;
         const simQuestion = simPos ? String((simPos as Record<string, unknown>).question || "") : "";
 
-        // If no Simmer position but there are Simmer trades, infer outcome from trades
         if (!simPos && simTrades.length > 0) {
           const sellTrades = simTrades.filter((t) => String(t.action || "").toLowerCase() === "sell");
           if (sellTrades.length > 0) {
@@ -626,44 +904,49 @@ export function dataRoutes(dataDir: string) {
           simOutcome = "gone";
         }
 
-        // API quirk: status still "active"/"open" but zero shares (already flat on Simmer)
         const stLow = simStatus.toLowerCase();
         if (simPos && !materialSimShares && (stLow === "active" || stLow === "open")) {
           simStatus = "closed";
           if (!simOutcome) simOutcome = "closed";
         }
 
-        // Determine local outcome: label > sell record > (if simmer says gone, mark as gone) > open
         let outcomeLocal = "open";
         if (label) {
-          outcomeLocal = label.won ? "win" : "loss";
+          outcomeLocal = Boolean(label.won) ? "win" : "loss";
         } else if (localSell) {
           outcomeLocal = "closed";
         } else if (simStatus === "gone" || simStatus === "sold" || simStatus === "resolved" || simStatus === "closed") {
           outcomeLocal = "gone";
         }
 
-        // Question: try simmer position, then simmer trades
         let question = simQuestion;
         if (!question && simTrades.length > 0) {
           question = String((simTrades[0] as Record<string, unknown>).question || "");
         }
 
+        const simmerBuyMatch =
+          Number.isFinite(buyAtMs) ? findClosestSimmerBuy(simTrades, side, buyAtMs) : null;
+        let feeVenue: number | null = extractVenueFee(simPos as Record<string, unknown>);
+        if (feeVenue == null && simmerBuyMatch) feeVenue = extractVenueFee(simmerBuyMatch);
+
         return {
           market_id: mid,
+          local_trade_key: bk,
           question,
           side,
           shares: buy.shares ?? null,
           investment: Number(buy.amount || 0),
           created_at: buy.created_at || null,
 
-          // Local outcome
           outcome_local: outcomeLocal,
           pnl_local: label ? Number(label.pnl ?? 0) : null,
           return_pct_local: label ? Number(label.return_pct ?? 0) : null,
-          reason_local: localSell ? String((localSell as Record<string, unknown>).reason || "") : (label ? String(label.source || "") : ""),
+          reason_local: localSell
+            ? String((localSell as Record<string, unknown>).reason || "")
+            : label
+              ? String(label.source || "")
+              : "",
 
-          // Simmer outcome
           outcome_simmer: simOutcome || simStatus || "",
           pnl_simmer: simPnl,
           cost_basis_simmer: simCostBasis,
@@ -671,8 +954,15 @@ export function dataRoutes(dataDir: string) {
           status_simmer: simStatus,
           shares_yes: sharesYes,
           shares_no: sharesNo,
-          resolves_at: simPos ? String((simPos as Record<string, unknown>).resolves_at ?? (simPos as Record<string, unknown>).end_date ?? "") : "",
+          resolves_at: simPos
+            ? String(
+                (simPos as Record<string, unknown>).resolves_at ??
+                  (simPos as Record<string, unknown>).end_date ??
+                  ""
+              )
+            : "",
           simmer_trades_count: simTrades.length,
+          fee_venue_sim: feeVenue,
         };
       });
 

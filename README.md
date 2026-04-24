@@ -1,13 +1,13 @@
 # Rookie
 
-**Rookie** is a trading stack for **[Simmer](https://simmer.markets)** (SIM venue): a Python engine that finds opportunities, sizes risk, and logs outcomes, plus a **Node** control plane and **React** dashboard. A lightweight **game layer** (points, fees, reports) runs alongside **economic PnL** on Simmer.
+**Rookie** is a trading stack for **[Simmer](https://simmer.markets)** (SIM venue): a Python engine that finds opportunities, sizes risk, and logs outcomes, plus a **Node** control plane and **React** dashboard. **Simmer** is the source of truth for balances, positions, and (when exposed) fees; Rookie keeps a small **local ledger** for pauses, cooldowns, and learning labels.
 
 ## Features
 
 - **Built-in cycle** — opportunity scan, filters (edge, liquidity, slippage, resolution window), ensemble-style ranking, Simmer context API, position caps, theme limits, optional skill scripts.
-- **Risk** — stop-loss / take-profit / max-hold monitor (1 min), daily loss pause, loss-streak entry pause, exposure and per-theme caps.
+- **Risk** — per-leg monitor: stop-loss, optional fixed take-profit, optional **return trailing** (peak giveback), max-hold per leg, daily loss pause, loss-streak entry pause, exposure and per-theme caps.
 - **Learning** — offline evaluator with optional time-split holdout and auto-apply of safe threshold tweaks; calibration report; optional `learning_effective_after` to drop early/noisy history.
-- **Ops** — scheduled cycle (15 min), monitor, 2h fee/report; optional Telegram advisor; optional OpenClaw hooks; WebSocket + REST API; decision journal and config audit trail.
+- **Ops** — scheduled cycle (15 min), monitor, periodic Simmer snapshot report; optional Telegram advisor; WebSocket + REST API; decision journal and config audit trail. No in-repo AI or OpenClaw integration (use external tools beside Rookie if you want).
 
 ## Stack
 
@@ -30,10 +30,14 @@
 From the repo root:
 
 ```powershell
-.\start.ps1
+.\start-rookie.ps1
 ```
 
-This frees ports **3001** and **5173**, then starts backend and frontend in separate windows. Use `.\restart.ps1` to recycle processes.
+This runs **preflight checks** (Node/npm/Python, `npm install` if `node_modules` missing, `python -m engine.src.main state`, frontend `tsc --noEmit`), then frees ports **3001** and **5173**, starts backend and frontend in separate windows, and waits for `GET /health`. Use `.\start.ps1` as an alias for the same script, or `.\restart.ps1` to kill listeners first.
+
+- **Skip checks (fast):** `.\start-rookie.ps1 -SkipPreflight`
+- **Full frontend build in preflight:** `.\start-rookie.ps1 -FullTest`
+- **Do not open browser:** `.\start-rookie.ps1 -NoBrowser`
 
 ### Manual
 
@@ -60,7 +64,6 @@ Put secrets in **`.env`** at the repo root and/or **`data/.env.local`** (see bel
 | `SIMMER_API_KEY` | Simmer API (required for live trading) |
 | `PORT` | Backend port (default `3001`) |
 | `TELEGRAM_BOT_TOKEN` / `TELEGRAM_CHAT_ID` | Optional Telegram advisor |
-| `OPENCLAW_URL` / `OPENCLAW_HOOKS_TOKEN` | Optional OpenClaw webhooks |
 | `CALIBRATE_DAILY_CRON` | Set to `off` to disable nightly calibration cron |
 | `TELEGRAM_DISABLE_POLL` | `1` = no `getUpdates` poll (second backend instance) |
 
@@ -73,10 +76,11 @@ Run from **repo root**:
 ```bash
 python -m engine.src.main cycle    # one trading cycle
 python -m engine.src.main monitor  # position monitor pass
-python -m engine.src.main report   # 2h fee + report payload
-python -m engine.src.main state    # game state JSON
+python -m engine.src.main report   # Simmer snapshot report payload
+python -m engine.src.main state    # runtime ledger JSON
 python -m engine.src.main evaluate   # offline evaluator → model_eval_latest.json
 python -m engine.src.main calibrate  # calibration → model_calibration_latest.json
+python -m engine.src.main export-simmer-labels  # model_labels_simmer.jsonl from Simmer trades
 ```
 
 The backend normally invokes these via **`POST /api/engine/*`** and the scheduler.
@@ -91,13 +95,13 @@ The backend normally invokes these via **`POST /api/engine/*`** and the schedule
 ├── docs/               # Extra design / telemetry notes
 ├── skills/             # Optional Python skill scripts (wired from backend)
 ├── start.ps1 / restart.ps1
-├── GAME_RULES.md       # Points, fees, death rules, strategy knobs
+├── GAME_RULES.md       # Operational risk rules, monitor semantics, evaluator notes
 └── IMPROVEMENTS_IMPLEMENTED.md
 ```
 
 ## Documentation
 
-- **[GAME_RULES.md](GAME_RULES.md)** — scoring, reporting cadence, death, engine risk settings.
+- **[GAME_RULES.md](GAME_RULES.md)** — monitor per-leg rules, reporting, risk settings, Simmer label export.
 - **[docs/](docs/)** — codebase notes, skills telemetry, recommendations.
 
 ## License

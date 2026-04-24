@@ -20,8 +20,8 @@ export function initScheduler(projectRoot: string) {
   cron.schedule("*/15 * * * *", () => {
     runCycle(port);
   });
-  // Fee + report every 2 hours (via API so logging/health matches other engine routes)
-  cron.schedule("0 */2 * * *", () => {
+  // Fee + report every 2 hours, offset by +2 minutes to avoid colliding with 15-min cycle.
+  cron.schedule("2 */2 * * *", () => {
     runReport(projectRoot, port);
   });
 
@@ -93,12 +93,11 @@ async function runCalibrateNightly(port: number) {
 }
 
 async function runReport(projectRoot: string, port: number) {
-  addLog("info", "Scheduler: running 2h report (fee -1 point)");
+  addLog("info", "Scheduler: running periodic Simmer snapshot report");
   try {
     const r = await fetch(`http://127.0.0.1:${port}/api/engine/report`, { method: "POST" });
     const result = (await r.json().catch(() => ({}))) as {
-      state?: { points?: number };
-      report?: { points?: number };
+      report?: { fees_recent_sum?: number; positions_count?: number };
       error?: string;
     };
     if (!r.ok) {
@@ -111,9 +110,11 @@ async function runReport(projectRoot: string, port: number) {
     const filename = `report-${new Date().toISOString().replace(/[:.]/g, "-")}.json`;
     await fs.writeFile(path.join(reportsDir, filename), JSON.stringify(result, null, 2));
     broadcast({ type: "report", payload: result });
+    const fees = result?.report?.fees_recent_sum;
+    const posN = result?.report?.positions_count;
     addLog(
       "success",
-      `Scheduler: report saved (points: ${result?.state?.points ?? result?.report?.points ?? "—"})`
+      `Scheduler: report saved (fees recent: ${fees ?? "—"}, positions: ${posN ?? "—"})`
     );
   } catch (e) {
     addLog("error", `Scheduler: report failed — ${String(e)}`);
@@ -207,7 +208,7 @@ function startTelegramAdvisorBot(projectRoot: string, port: number) {
             const health = (await r.json().catch(() => ({}))) as Record<string, any>;
             const statusText =
               `Rookie status\n` +
-              `backend=${health?.backend?.status || "?"}, simmer=${health?.simmer?.status || "?"}, engine=${health?.engine?.status || "?"}, openclaw=${health?.openclaw?.status || "?"}`;
+              `backend=${health?.backend?.status || "?"}, simmer=${health?.simmer?.status || "?"}, engine=${health?.engine?.status || "?"}`;
             await sendTelegramMessage(token, telegramChatIdRuntime, statusText);
           } catch (e) {
             await sendTelegramMessage(token, telegramChatIdRuntime, `Status check failed: ${String(e)}`);

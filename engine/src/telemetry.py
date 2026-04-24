@@ -2,7 +2,7 @@
 from typing import Any, Optional
 
 TELEMETRY_SCHEMA_VERSION = 1
-# Automation optimizes economic outcome on Simmer; game points are a separate discipline layer.
+# Automation optimizes economic outcome on Simmer (ledger + risk state in data/).
 PRIMARY_AUTOMATION_KPI = "economic_pnl_simmer"
 
 

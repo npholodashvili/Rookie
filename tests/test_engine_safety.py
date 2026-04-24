@@ -3,6 +3,8 @@ import sys
 import unittest
 from datetime import datetime, timezone
 from pathlib import Path
+import json
+import tempfile
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
@@ -15,6 +17,7 @@ from engine.src.offline_evaluator import (
     _score_policy_on_rows,
     filter_eval_rows_by_learning_window,
     parse_learning_effective_after,
+    evaluate_offline,
 )
 from engine.src.trade_executor import _candidate_sort_key, _ensemble_sort_tuple, _portfolio_theme_counts
 
@@ -99,6 +102,59 @@ class TestScorePolicyRows(unittest.TestCase):
         m = _score_policy_on_rows(rows, 0.0, 1.0, 0.0)
         self.assertEqual(m["n"], 2)
         self.assertAlmostEqual(m["win_rate"], 0.5)
+
+
+class TestEvaluatorTradeExecJoin(unittest.TestCase):
+    def test_prefers_trade_exec_key_join(self):
+        with tempfile.TemporaryDirectory() as td:
+            base = Path(td)
+            feats = base / "features.jsonl"
+            labs = base / "labels.jsonl"
+            feats.write_text(
+                "\n".join(
+                    [
+                        json.dumps(
+                            {
+                                "timestamp": "2026-01-01T00:00:00Z",
+                                "market_id": "m1",
+                                "side": "yes",
+                                "trade_exec_key": "t1",
+                                "expected_edge": 0.05,
+                                "edge": 0.05,
+                                "slippage_pct": 0.01,
+                                "volume_24h": 1000,
+                            }
+                        ),
+                        json.dumps(
+                            {
+                                "timestamp": "2026-01-01T01:00:00Z",
+                                "market_id": "m1",
+                                "side": "yes",
+                                "trade_exec_key": "t2",
+                                "expected_edge": 0.05,
+                                "edge": 0.05,
+                                "slippage_pct": 0.01,
+                                "volume_24h": 1000,
+                            }
+                        ),
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            labs.write_text(
+                "\n".join(
+                    [
+                        json.dumps({"timestamp": "2026-01-02T00:00:00Z", "market_id": "m1", "side": "yes", "trade_exec_key": "t1", "won": True, "return_pct": 0.2, "source": "resolved-position"}),
+                        json.dumps({"timestamp": "2026-01-02T01:00:00Z", "market_id": "m1", "side": "yes", "trade_exec_key": "t2", "won": False, "return_pct": -0.2, "source": "resolved-position"}),
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            result = evaluate_offline(features_path=feats, labels_path=labs)
+            self.assertTrue(result.get("ok"))
+            self.assertEqual(result.get("samples"), 2)
 
 
 if __name__ == "__main__":

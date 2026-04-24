@@ -11,10 +11,11 @@ TRADE_HISTORY_PATH = DATA_DIR / "trade_history.json"
 DECISION_JOURNAL_PATH = DATA_DIR / "decision_journal.jsonl"
 MODEL_FEATURES_PATH = DATA_DIR / "model_features.jsonl"
 MODEL_LABELS_PATH = DATA_DIR / "model_labels.jsonl"
+MODEL_LABELS_SIMMER_PATH = DATA_DIR / "model_labels_simmer.jsonl"
 MODEL_EVAL_PATH = DATA_DIR / "model_eval_latest.json"
 MODEL_CALIBRATION_PATH = DATA_DIR / "model_calibration_latest.json"
 STRATEGY_CONFIG_PATH = DATA_DIR / "strategy_config.json"
-GRAVEYARD_PATH = DATA_DIR / "graveyard.json"
+MONITOR_LEG_PEAKS_PATH = DATA_DIR / "monitor_leg_peaks.json"
 
 # Budget cap (real-world scenario)
 MAX_BUDGET_SIM = 200.0

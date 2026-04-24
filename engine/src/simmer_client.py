@@ -1,5 +1,6 @@
 """Simmer.markets API client with 200 $SIM budget cap. Uses both SDK and direct API."""
 import os
+from datetime import datetime, timezone
 from typing import Any, Optional
 
 import httpx
@@ -11,6 +12,7 @@ load_dotenv()
 
 SIMMER_API_BASE = "https://api.simmer.markets"
 _simmer_client_sdk = None
+_last_api_error: Optional[dict] = None
 
 
 def get_simmer_client():
@@ -41,8 +43,10 @@ def _api_request(
     params: Optional[dict] = None,
 ) -> Optional[dict]:
     """Make direct API request to Simmer."""
+    global _last_api_error
     key = api_key or os.environ.get("SIMMER_API_KEY")
     if not key:
+        _last_api_error = {"path": path, "code": "missing_api_key"}
         return None
     url = f"{SIMMER_API_BASE}{path}"
     headers = {"Authorization": f"Bearer {key}", "Content-Type": "application/json"}
@@ -50,9 +54,24 @@ def _api_request(
         with httpx.Client(timeout=30.0) as client:
             r = client.request(method, url, json=json_body, params=params, headers=headers)
             r.raise_for_status()
+            _last_api_error = None
             return r.json() if r.content else {}
-    except Exception:
+    except Exception as exc:
+        status = None
+        if isinstance(exc, httpx.HTTPStatusError):
+            status = exc.response.status_code
+        _last_api_error = {
+            "path": path,
+            "method": method,
+            "status_code": status,
+            "error_type": exc.__class__.__name__,
+            "message": str(exc),
+        }
         return None
+
+
+def get_last_api_error() -> Optional[dict]:
+    return _last_api_error
 
 
 def get_agent_me(api_key: Optional[str] = None) -> Optional[dict]:
@@ -108,9 +127,26 @@ def get_opportunities(
     if not data:
         return []
     items = data.get("markets") or data.get("opportunities")
-    if isinstance(items, list):
-        return items
-    return data if isinstance(data, list) else []
+    rows = items if isinstance(items, list) else (data if isinstance(data, list) else [])
+    if not isinstance(rows, list):
+        return []
+    # Defensive prune: upstream can return stale/resolved rows in opportunities feed.
+    out: list[dict] = []
+    now = datetime.now(timezone.utc)
+    for m in rows:
+        if not isinstance(m, dict):
+            continue
+        resolves_at = m.get("resolves_at") or m.get("end_date")
+        if resolves_at:
+            try:
+                dt = datetime.fromisoformat(str(resolves_at).replace("Z", "+00:00"))
+                if dt <= now:
+                    continue
+            except Exception:
+                # Keep parse-failed rows; runtime guards in executor will still filter.
+                pass
+        out.append(m)
+    return out
 
 
 def get_market_context(api_key: Optional[str] = None, market_id: str = "") -> Optional[dict]:

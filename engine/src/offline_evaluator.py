@@ -210,6 +210,8 @@ def evaluate_offline(
     evaluator_segment_min_samples: int = 18,
     segment_merge_score_slack: float = 0.04,
     learning_effective_after: Optional[str] = None,
+    features_path: Optional[Path] = None,
+    labels_path: Optional[Path] = None,
 ) -> dict:
     """
     Evaluate threshold policies using executed-feature rows joined to labels.
@@ -217,8 +219,10 @@ def evaluate_offline(
     When time_split_validate is True and enough timed rows + holdout exist, the best
     policy is chosen on the train slice only; auto-apply should require holdout_passed.
     """
-    features = _read_jsonl(MODEL_FEATURES_PATH)
-    labels = _read_jsonl(MODEL_LABELS_PATH)
+    feat_p = features_path or MODEL_FEATURES_PATH
+    lab_p = labels_path or MODEL_LABELS_PATH
+    features = _read_jsonl(feat_p)
+    labels = _read_jsonl(lab_p)
     if not features:
         result = {"ok": True, "message": "no features yet", "samples": 0}
         MODEL_EVAL_PATH.write_text(json.dumps(result, indent=2), encoding="utf-8")
@@ -232,13 +236,33 @@ def evaluate_offline(
 
     label_map: dict[str, dict] = {}
     for lb in labels:
-        key = f"{lb.get('market_id')}::{lb.get('side', 'unknown')}"
-        label_map[key] = lb
+        mid = lb.get("market_id")
+        side = lb.get("side", "unknown")
+        base = f"{mid}::{side}"
+        label_ts = _parse_feature_ts(lb.get("timestamp"))
+        prev = label_map.get(base)
+        prev_ts = _parse_feature_ts(prev.get("timestamp")) if isinstance(prev, dict) else None
+        if prev is None or (label_ts and (prev_ts is None or label_ts > prev_ts)):
+            label_map[base] = lb
+        tid = lb.get("trade_id")
+        if tid:
+            label_map[f"{base}:::{tid}"] = lb
+        exec_key = lb.get("trade_exec_key")
+        if exec_key:
+            label_map[f"exec::{exec_key}"] = lb
 
     rows: list[EvalRow] = []
     for ft in features:
-        key = f"{ft.get('market_id')}::{ft.get('side', 'unknown')}"
-        lb = label_map.get(key)
+        mid = ft.get("market_id")
+        side = ft.get("side", "unknown")
+        base = f"{mid}::{side}"
+        tid = ft.get("trade_id")
+        exec_key = ft.get("trade_exec_key")
+        lb = label_map.get(f"exec::{exec_key}") if exec_key else None
+        if lb is None:
+            lb = label_map.get(f"{base}:::{tid}") if tid else None
+        if lb is None:
+            lb = label_map.get(base)
         if not lb:
             continue
         src = str(lb.get("source") or "unknown")

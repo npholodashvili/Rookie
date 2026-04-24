@@ -58,8 +58,6 @@ export async function buildAdvisorReport(port: number, projectRoot: string, trig
   const simmerLosses = Number(me?.loss_count ?? 0);
   const rookieWins = Number(gameState?.wins ?? 0);
   const rookieLosses = Number(gameState?.losses ?? 0);
-  const points = Number(gameState?.points ?? 0);
-
   const evalDelta = Number(learning?.baseline_vs_adaptive?.delta_score ?? learning?.model_eval?.improvement_over_baseline_score ?? 0);
   const evalConf = Number(learning?.baseline_vs_adaptive?.adaptive_confidence ?? learning?.model_eval?.best_policy?.confidence ?? 0);
   const evalSamples = Number(learning?.model_eval?.samples ?? hourly?.paired_samples ?? 0);
@@ -142,7 +140,7 @@ export async function buildAdvisorReport(port: number, projectRoot: string, trig
   const text =
     `Rookie Advisor · ${verdict} · ${trigger}\n` +
     `Money: portfolio ${fmt(pnlPortfolio)} (account) · agent/me ${fmt(pnlAgent)} · gap ${fmt(pnlGap)}\n` +
-    `Game: ${points} pts · Rookie ledger ${rookieWins}W/${rookieLosses}L · Simmer me ${simmerWins}W/${simmerLosses}L (different scope)\n` +
+    `Ledger: Rookie ${rookieWins}W/${rookieLosses}L · Simmer me ${simmerWins}W/${simmerLosses}L (scope differs)\n` +
     `Risk: ${String(learning?.strategy_mode ?? "?")} · pauses: ${pauseStr} · open positions: ${openN}\n` +
     `${learnLine} · score ${Math.round(Number(learning?.score ?? 0))}\n` +
     `Flow: 24h cycle trade ${(Number(learning?.cycle_trade_rate_24h ?? 0) * 100).toFixed(0)}% · hours: ${formatTopHoursBrief(topHours)}\n` +
